@@ -48,6 +48,12 @@
 #include <linux/uaccess.h>
 #include <asm/page.h>
 
+/* Experimental mode: never changed while any journal is active. */
+static bool split_log_space;
+module_param(split_log_space, bool, 0444);
+MODULE_PARM_DESC(split_log_space,
+	"Use a separate leaf lock for journal-position allocation and snapshots");
+
 #ifdef CONFIG_JBD2_DEBUG
 static ushort jbd2_journal_enable_debug __read_mostly;
 
@@ -816,7 +822,11 @@ int jbd2_journal_next_log_block(journal_t *journal, unsigned long long *retp)
 {
 	unsigned long blocknr;
 
-	write_lock(&journal->j_state_lock);
+	/* No state/lifetime access here; release before bmap and error handling. */
+	if (journal->j_split_log_space)
+		spin_lock(&journal->j_log_space_lock);
+	else
+		write_lock(&journal->j_state_lock);
 	J_ASSERT(journal->j_free > 1);
 
 	blocknr = journal->j_head;
@@ -824,7 +834,10 @@ int jbd2_journal_next_log_block(journal_t *journal, unsigned long long *retp)
 	journal->j_free--;
 	if (journal->j_head == journal->j_last)
 		journal->j_head = journal->j_first;
-	write_unlock(&journal->j_state_lock);
+	if (journal->j_split_log_space)
+		spin_unlock(&journal->j_log_space_lock);
+	else
+		write_unlock(&journal->j_state_lock);
 	return jbd2_journal_bmap(journal, blocknr, retp);
 }
 
@@ -1022,6 +1035,8 @@ int jbd2_journal_get_log_tail(journal_t *journal, tid_t *tid,
 
 	read_lock(&journal->j_state_lock);
 	spin_lock(&journal->j_list_lock);
+	if (journal->j_split_log_space)
+		spin_lock(&journal->j_log_space_lock);
 	transaction = journal->j_checkpoint_transactions;
 	if (transaction) {
 		*tid = transaction->t_tid;
@@ -1037,6 +1052,8 @@ int jbd2_journal_get_log_tail(journal_t *journal, tid_t *tid,
 		*block = journal->j_head;
 	}
 	ret = tid_gt(*tid, journal->j_tail_sequence);
+	if (journal->j_split_log_space)
+		spin_unlock(&journal->j_log_space_lock);
 	spin_unlock(&journal->j_list_lock);
 	read_unlock(&journal->j_state_lock);
 
@@ -1071,6 +1088,9 @@ int __jbd2_update_log_tail(journal_t *journal, tid_t tid, unsigned long block)
 		goto out;
 
 	write_lock(&journal->j_state_lock);
+	/* The durable tail update above must precede publishing reusable space. */
+	if (journal->j_split_log_space)
+		spin_lock(&journal->j_log_space_lock);
 	freed = block - journal->j_tail;
 	if (block < journal->j_tail)
 		freed += journal->j_last - journal->j_first;
@@ -1084,6 +1104,8 @@ int __jbd2_update_log_tail(journal_t *journal, tid_t tid, unsigned long block)
 	journal->j_free += freed;
 	journal->j_tail_sequence = tid;
 	journal->j_tail = block;
+	if (journal->j_split_log_space)
+		spin_unlock(&journal->j_log_space_lock);
 	write_unlock(&journal->j_state_lock);
 
 out:
@@ -1554,6 +1576,8 @@ static journal_t *journal_init_common(struct block_device *bdev,
 	spin_lock_init(&journal->j_list_lock);
 	spin_lock_init(&journal->j_history_lock);
 	rwlock_init(&journal->j_state_lock);
+	spin_lock_init(&journal->j_log_space_lock);
+	journal->j_split_log_space = split_log_space;
 
 	journal->j_commit_interval = (HZ * JBD2_DEFAULT_MAX_COMMIT_AGE);
 	journal->j_min_batch_time = 0;
@@ -2479,7 +2503,11 @@ int jbd2_journal_flush(journal_t *journal, unsigned int flags)
 	J_ASSERT(!journal->j_running_transaction);
 	J_ASSERT(!journal->j_committing_transaction);
 	J_ASSERT(!journal->j_checkpoint_transactions);
+	if (journal->j_split_log_space)
+		spin_lock(&journal->j_log_space_lock);
 	J_ASSERT(journal->j_head == journal->j_tail);
+	if (journal->j_split_log_space)
+		spin_unlock(&journal->j_log_space_lock);
 	J_ASSERT(journal->j_tail_sequence == journal->j_transaction_sequence);
 	write_unlock(&journal->j_state_lock);
 out:

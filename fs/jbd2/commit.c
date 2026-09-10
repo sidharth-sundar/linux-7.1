@@ -11,6 +11,7 @@
  */
 
 #include <linux/time.h>
+#include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/jbd2.h>
 #include <linux/errno.h>
@@ -25,6 +26,12 @@
 #include <linux/blkdev.h>
 #include <linux/bitops.h>
 #include <trace/events/jbd2.h>
+
+/* Experiment selection is read-only after boot/module initialization. */
+static bool move_publication_wake;
+module_param(move_publication_wake, bool, 0444);
+MODULE_PARM_DESC(move_publication_wake,
+	"Wake transaction-publication waiters after releasing j_state_lock");
 
 /*
  * IO end handler for temporary buffer_heads handling writes to the journal.
@@ -562,9 +569,22 @@ void jbd2_journal_commit_transaction(journal_t *journal)
 	journal->j_committing_transaction = commit_transaction;
 	journal->j_running_transaction = NULL;
 	start_time = ktime_get();
+	if (journal->j_split_log_space)
+		spin_lock(&journal->j_log_space_lock);
 	commit_transaction->t_log_start = journal->j_head;
-	wake_up_all(&journal->j_wait_transaction_locked);
+	if (journal->j_split_log_space)
+		spin_unlock(&journal->j_log_space_lock);
+	if (!move_publication_wake)
+		wake_up_all(&journal->j_wait_transaction_locked);
 	write_unlock(&journal->j_state_lock);
+	/*
+	 * Old-transaction waiters enqueue and set their task state before
+	 * dropping j_state_lock for reading. They cannot miss this wake.
+	 * New readers recheck the published transaction state under the lock.
+	 * The queue belongs to the journal, whose lifetime covers this commit.
+	 */
+	if (move_publication_wake)
+		wake_up_all(&journal->j_wait_transaction_locked);
 
 	jbd2_debug(3, "JBD2: commit phase 2a\n");
 

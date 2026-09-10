@@ -798,6 +798,8 @@ struct journal_s
 	 * @j_state_lock: Protect the various scalars in the journal.
 	 */
 	rwlock_t		j_state_lock;
+	/* Experimental boot-time mode, immutable after journal initialization. */
+	bool			j_split_log_space;
 
 	/**
 	 * @j_barrier_count:
@@ -915,10 +917,17 @@ struct journal_s
 	transaction_t		*j_shrink_transaction;
 
 	/**
+	 * @j_log_space_lock:
+	 * Experimental leaf lock for head/free and tail reclamation. Nest after
+	 * j_state_lock and j_list_lock; never acquire either while holding it.
+	 */
+	spinlock_t		j_log_space_lock ____cacheline_aligned_in_smp;
+
+	/**
 	 * @j_head:
 	 *
 	 * Journal head: identifies the first unused block in the journal.
-	 * [j_state_lock]
+	 * [j_state_lock; j_log_space_lock instead in split mode]
 	 */
 	unsigned long		j_head;
 
@@ -926,7 +935,7 @@ struct journal_s
 	 * @j_tail:
 	 *
 	 * Journal tail: identifies the oldest still-used block in the journal.
-	 * [j_state_lock]
+	 * [j_state_lock; writers also take j_log_space_lock in split mode]
 	 */
 	unsigned long		j_tail;
 
@@ -934,7 +943,7 @@ struct journal_s
 	 * @j_free:
 	 *
 	 * Journal free: how many free blocks are there in the journal?
-	 * [j_state_lock]
+	 * [j_state_lock; j_log_space_lock instead in split mode]
 	 */
 	unsigned long		j_free;
 
@@ -1774,13 +1783,25 @@ static inline int jbd2_journal_get_num_fc_blks(journal_superblock_t *jsb)
  */
 static inline unsigned long jbd2_log_space_left(journal_t *journal)
 {
+	long free;
+
+	/*
+	 * State locking still pins the committing transaction. Exclude allocation
+	 * across BOTH loads: old free paired with newer, discharged committing
+	 * credits could overestimate space. A pending credit discharge remains
+	 * conservative, just as in stock. Never drop the caller's state lock.
+	 */
+	if (journal->j_split_log_space)
+		spin_lock(&journal->j_log_space_lock);
 	/* Allow for rounding errors */
-	long free = journal->j_free - 32;
+	free = journal->j_free - 32;
 
 	if (journal->j_committing_transaction) {
 		free -= atomic_read(&journal->
                         j_committing_transaction->t_outstanding_credits);
 	}
+	if (journal->j_split_log_space)
+		spin_unlock(&journal->j_log_space_lock);
 	return max_t(long, free, 0);
 }
 
