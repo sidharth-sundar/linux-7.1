@@ -537,6 +537,9 @@ asmlinkage long sys_fstatat64(int dfd, const char __user *filename,
 asmlinkage long sys_sync(void);
 asmlinkage long sys_fsync(unsigned int fd);
 asmlinkage long sys_fdatasync(unsigned int fd);
+/* UFS */
+asmlinkage long sys_fbarrier(unsigned int fd);
+asmlinkage long sys_fdatabarrier(unsigned int fd);
 asmlinkage long sys_sync_file_range2(int fd, unsigned int flags,
 				     loff_t offset, loff_t nbytes);
 asmlinkage long sys_sync_file_range(int fd, loff_t offset, loff_t nbytes,

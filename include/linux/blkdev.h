@@ -637,6 +637,11 @@ struct request_queue {
 	bool			mq_freeze_queue_dying;
 #endif
 	wait_queue_head_t	mq_freeze_wq;
+
+	/* UFS */
+	mempool_t *epoch_pool;
+	mempool_t *epoch_link_pool;
+
 	/*
 	 * Protect concurrent access to q_usage_counter by
 	 * percpu_ref_kill() and percpu_ref_reinit().
@@ -1227,7 +1232,25 @@ static inline void blk_plug_invalidate_ts(struct task_struct *tsk)
 }
 
 int blkdev_issue_flush(struct block_device *bdev);
+int blkdev_issue_barrier(struct block_device *bdev);
 long nr_blockdev_pages(void);
+
+/* UFS */
+static inline void get_epoch(struct epoch *epoch)
+{
+	atomic_inc(&epoch->e_count);
+}
+static inline void put_epoch(struct epoch *epoch)
+{
+	if (atomic_dec_and_test(&epoch->e_count))
+		mempool_free(epoch, epoch->q->epoch_pool);
+}
+
+extern void blk_issue_barrier_plug(void);
+extern void blk_request_dispatched(struct request *req);
+extern void blk_start_epoch(struct request_queue *q);
+extern void blk_finish_epoch(void);
+
 #else /* CONFIG_BLOCK */
 struct blk_plug {
 };

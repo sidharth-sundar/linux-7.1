@@ -1243,12 +1243,16 @@ static inline int folio_wait_locked_killable(struct folio *folio)
 
 void folio_end_read(struct folio *folio, bool success);
 void wait_on_page_writeback(struct page *page);
+void wait_on_page_dispatch(struct page *page); /* UFS */
 void folio_wait_writeback(struct folio *folio);
+void folio_wait_dispatch(struct folio *folio); /* UFS */
 int folio_wait_writeback_killable(struct folio *folio);
 void end_page_writeback(struct page *page);
+void end_page_dispatch(struct page *page); /* UFS */
 void folio_end_writeback(struct folio *folio);
 void folio_end_writeback_no_dropbehind(struct folio *folio);
 void folio_end_dropbehind(struct folio *folio);
+void folio_end_dispatch(struct folio *folio);
 void folio_wait_stable(struct folio *folio);
 void __folio_mark_dirty(struct folio *folio, struct address_space *, int warn);
 void folio_account_cleaned(struct folio *folio, struct bdi_writeback *wb);

@@ -101,7 +101,7 @@ TRACE_EVENT(block_rq_requeue,
 		__entry->nr_sector = blk_rq_trace_nr_sectors(rq);
 		__entry->ioprio    = req_get_ioprio(rq);
 
-		blk_fill_rwbs(__entry->rwbs, rq->cmd_flags);
+		blk_fill_rwbs(__entry->rwbs, rq->cmd_flags | rq->cmd_bflags);
 		__get_str(cmd)[0] = '\0';
 	),
 
@@ -138,7 +138,7 @@ DECLARE_EVENT_CLASS(block_rq_completion,
 		__entry->error     = blk_status_to_errno(error);
 		__entry->ioprio    = req_get_ioprio(rq);
 
-		blk_fill_rwbs(__entry->rwbs, rq->cmd_flags);
+		blk_fill_rwbs(__entry->rwbs, rq->cmd_flags | rq->cmd_bflags);
 		__get_str(cmd)[0] = '\0';
 	),
 
@@ -211,7 +211,7 @@ DECLARE_EVENT_CLASS(block_rq,
 		__entry->bytes     = blk_rq_bytes(rq);
 		__entry->ioprio	   = req_get_ioprio(rq);
 
-		blk_fill_rwbs(__entry->rwbs, rq->cmd_flags);
+		blk_fill_rwbs(__entry->rwbs, rq->cmd_flags | rq->cmd_bflags);
 		__get_str(cmd)[0] = '\0';
 		memcpy(__entry->comm, current->comm, TASK_COMM_LEN);
 	),
@@ -250,6 +250,14 @@ DEFINE_EVENT(block_rq, block_rq_insert,
  * device driver for processing.
  */
 DEFINE_EVENT(block_rq, block_rq_issue,
+
+	TP_PROTO(struct request *rq),
+
+	TP_ARGS(rq)
+);
+
+/* UFS */
+DEFINE_EVENT(block_rq, block_rq_dispatch,
 
 	TP_PROTO(struct request *rq),
 
@@ -588,7 +596,7 @@ TRACE_EVENT(block_rq_remap,
 		__entry->old_dev	= dev;
 		__entry->old_sector	= from;
 		__entry->nr_bios	= blk_rq_count_bios(rq);
-		blk_fill_rwbs(__entry->rwbs, rq->cmd_flags);
+		blk_fill_rwbs(__entry->rwbs, rq->cmd_flags | rq->cmd_bflags);
 	),
 
 	TP_printk("%d,%d %s %llu + %u <- (%d,%d) %llu %u",

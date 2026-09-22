@@ -2842,7 +2842,7 @@ static int ext4_do_writepages(struct mpage_da_data *mpd)
 	 */
 	if (ext4_should_journal_data(inode)) {
 		mpd->can_map = 0;
-		if (wbc->sync_mode == WB_SYNC_ALL)
+		if (wbc->sync_mode != WB_SYNC_NONE)
 			ext4_fc_commit(sbi->s_journal,
 				       EXT4_I(inode)->i_datasync_tid);
 	}
@@ -2873,7 +2873,7 @@ static int ext4_do_writepages(struct mpage_da_data *mpd)
 
 	ext4_io_submit_init(&mpd->io_submit, wbc);
 retry:
-	if (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages)
+	if (wbc->sync_mode != WB_SYNC_NONE || wbc->tagged_writepages)
 		tag_pages_for_writeback(mapping, mpd->start_pos >> PAGE_SHIFT,
 					mpd->end_pos >> PAGE_SHIFT);
 	blk_start_plug(&plug);
@@ -3000,6 +3000,10 @@ retry:
 			break;
 	}
 unplug:
+	/* UFS */
+	if (wbc->sync_mode == WB_BARRIER_ALL)
+		blk_issue_barrier_plug();
+
 	blk_finish_plug(&plug);
 	if (!ret && !cycled && wbc->nr_to_write > 0) {
 		cycled = 1;
@@ -5780,7 +5784,7 @@ int ext4_write_inode(struct inode *inode, struct writeback_control *wbc)
 		 * ext4_sync_fs() will force the commit after everything is
 		 * written.
 		 */
-		if (wbc->sync_mode != WB_SYNC_ALL || wbc->for_sync)
+		if (wbc->sync_mode == WB_SYNC_NONE || wbc->for_sync)
 			return 0;
 
 		err = ext4_fc_commit(EXT4_SB(inode->i_sb)->s_journal,
@@ -5795,7 +5799,7 @@ int ext4_write_inode(struct inode *inode, struct writeback_control *wbc)
 		 * sync(2) will flush the whole buffer cache. No need to do
 		 * it here separately for each inode.
 		 */
-		if (wbc->sync_mode == WB_SYNC_ALL && !wbc->for_sync)
+		if (wbc->sync_mode != WB_SYNC_NONE && !wbc->for_sync)
 			sync_dirty_buffer(iloc.bh);
 		if (buffer_req(iloc.bh) && !buffer_uptodate(iloc.bh)) {
 			ext4_error_inode_block(inode, iloc.bh->b_blocknr, EIO,

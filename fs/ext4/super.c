@@ -523,6 +523,8 @@ static bool ext4_journalled_writepage_needs_redirty(struct jbd2_inode *jinode,
 	struct journal_head *jh;
 	transaction_t *trans = READ_ONCE(jinode->i_transaction);
 
+	int ver_tid = jbd2_cjfs_slot(trans);
+
 	bh = head = folio_buffers(folio);
 	do {
 		/*
@@ -540,8 +542,8 @@ static bool ext4_journalled_writepage_needs_redirty(struct jbd2_inode *jinode,
 		 */
 		jh = bh2jh(bh);
 		if (buffer_dirty(bh) ||
-		    (jh && (jh->b_transaction != trans ||
-			    jh->b_next_transaction)))
+		    (jh && (jh->b_jh_entry[ver_tid]->b_transaction != trans ||
+			    jh->b_jh_entry[ver_tid]->b_next_transaction)))
 			return true;
 	} while ((bh = bh->b_this_page) != head);
 

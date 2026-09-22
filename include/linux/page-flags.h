@@ -127,6 +127,7 @@ enum pageflags {
 #ifdef CONFIG_ARCH_USES_PG_ARCH_3
 	PG_arch_3,
 #endif
+	PG_dispatch,	/* UFS */
 	__NR_PAGEFLAGS,
 
 	PG_readahead = PG_reclaim,
@@ -590,6 +591,7 @@ FOLIO_FLAG(owner_2, FOLIO_HEAD_PAGE)
  */
 TESTPAGEFLAG(Writeback, writeback, PF_NO_TAIL)
 	TESTSCFLAG(Writeback, writeback, PF_NO_TAIL)
+FOLIO_FLAG(dispatch, FOLIO_HEAD_PAGE)
 FOLIO_FLAG(mappedtodisk, FOLIO_HEAD_PAGE)
 
 /* PG_readahead is only used for reads; PG_reclaim is only for writes */

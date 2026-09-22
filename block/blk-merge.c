@@ -770,6 +770,16 @@ u8 bio_seg_gap(struct request_queue *q, struct bio *prev, struct bio *next,
 	return gaps_bit;
 }
 
+/* UFS */
+static void request_epoch_merge(struct request_queue *q, struct request *req, struct request *next)
+{
+	if (next->cmd_bflags & REQ_ORDERED) {
+		req->cmd_bflags |= REQ_ORDERED;
+		if (next->cmd_bflags & REQ_BARRIER)
+			req->cmd_bflags |= REQ_BARRIER;
+	}
+}
+
 /*
  * For non-mq, this has to be called with the request spinlock acquired.
  * For mq with scheduling, the appropriate queue wide lock should be held.
@@ -837,6 +847,9 @@ static struct request *attempt_merge(struct request_queue *q,
 	req->phys_gap_bit = bio_seg_gap(req->q, req->biotail, next->bio,
 					min_not_zero(next->phys_gap_bit,
 						     req->phys_gap_bit));
+	/* UFS */
+	request_epoch_merge(q, req, next);
+
 	req->biotail->bi_next = next->bio;
 	req->biotail = next->biotail;
 
@@ -941,6 +954,16 @@ static void blk_account_io_merge_bio(struct request *req)
 	}
 }
 
+/* UFS */
+static inline void bio_epoch_merge(struct request *req, struct bio *bio)
+{
+	if (bio->bi_opf & REQ_ORDERED) {
+		req->cmd_bflags |= REQ_ORDERED;
+		if (bio->bi_opf & REQ_BARRIER)
+			req->cmd_bflags |= REQ_BARRIER;
+	}
+}
+
 enum bio_merge_status bio_attempt_back_merge(struct request *req,
 		struct bio *bio, unsigned int nr_segs)
 {
@@ -962,6 +985,9 @@ enum bio_merge_status bio_attempt_back_merge(struct request *req,
 
 	req->phys_gap_bit = bio_seg_gap(req->q, req->biotail, bio,
 					req->phys_gap_bit);
+	/* UFS */
+	bio_epoch_merge(req, bio);
+
 	req->biotail->bi_next = bio;
 	req->biotail = bio;
 	req->__data_len += bio->bi_iter.bi_size;
@@ -998,6 +1024,9 @@ static enum bio_merge_status bio_attempt_front_merge(struct request *req,
 
 	req->phys_gap_bit = bio_seg_gap(req->q, bio, req->bio,
 					req->phys_gap_bit);
+	/* UFS */
+	bio_epoch_merge(req, bio);
+
 	bio->bi_next = req->bio;
 	req->bio = bio;
 

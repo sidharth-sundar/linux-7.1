@@ -256,6 +256,9 @@ void bio_init(struct bio *bio, struct block_device *bdev, struct bio_vec *table,
 	bio->bi_max_vecs = max_vecs;
 	bio->bi_io_vec = table;
 	bio->bi_pool = NULL;
+
+	/* UFS */
+	bio->bi_epoch = NULL;
 }
 EXPORT_SYMBOL(bio_init);
 
@@ -334,10 +337,11 @@ static struct bio *__bio_chain_endio(struct bio *bio)
  * This function should only be used as a flag and must never be called.
  * If execution reaches here, it indicates a serious programming error.
  */
-static void bio_chain_endio(struct bio *bio)
+void bio_chain_endio(struct bio *bio)
 {
 	BUG();
 }
+EXPORT_SYMBOL(bio_chain_endio);
 
 /**
  * bio_chain - chain bio completions
@@ -1760,6 +1764,11 @@ again:
 	if (!bio_integrity_endio(bio))
 		return;
 
+	if (bio->bi_epoch) {
+		struct epoch *epoch = xchg(&bio->bi_epoch, NULL);
+		if (epoch)
+			put_epoch(epoch);
+	}
 	blk_zone_bio_endio(bio);
 
 	rq_qos_done_bio(bio);

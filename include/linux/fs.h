@@ -1942,6 +1942,8 @@ struct file_operations {
 	int (*flush) (struct file *, fl_owner_t id);
 	int (*release) (struct inode *, struct file *);
 	int (*fsync) (struct file *, loff_t, loff_t, int datasync);
+	/* UFS */
+	int (*fbarrier) (struct file *, loff_t, loff_t, int datasync);
 	int (*fasync) (int, struct file *, int);
 	int (*lock) (struct file *, int, struct file_lock *);
 	unsigned long (*get_unmapped_area)(struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
@@ -2630,9 +2632,19 @@ static inline int file_write_and_wait(struct file *file)
 	return file_write_and_wait_range(file, 0, LLONG_MAX);
 }
 
+/* UFS */
+extern void filemap_fdatadispatch(struct address_space *);
+extern void filemap_fdatadispatch_range(struct address_space *, loff_t lstart, loff_t lend);
+extern int filemap_write_and_dispatch_range(struct address_space *, loff_t lstart, loff_t lend);
+extern int filemap_ordered_write_range(struct address_space *, loff_t lstart, loff_t lend);
+
 extern int vfs_fsync_range(struct file *file, loff_t start, loff_t end,
 			   int datasync);
+/* UFS */
+extern int vfs_fbarrier_range(struct file *file, loff_t start, loff_t end, int datasync);
 extern int vfs_fsync(struct file *file, int datasync);
+/* UFS */
+extern int vfs_fbarrier(struct file *file, int datasync);
 
 extern int sync_file_range(struct file *file, loff_t offset, loff_t nbytes,
 				unsigned int flags);

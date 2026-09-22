@@ -11,6 +11,11 @@
 #ifndef JOURNAL_HEAD_H_INCLUDED
 #define JOURNAL_HEAD_H_INCLUDED
 
+/* CJFS */
+#define CJFS_MAX_VERSIONS 5
+// #define DEBUG_PROC_OP
+// #define DEBUG_FSYNC_LATENCY
+
 #include <linux/spinlock.h>
 
 typedef unsigned int		tid_t;		/* Unique transaction ID */
@@ -109,6 +114,23 @@ struct journal_head {
 
 	/* Trigger type for the committing transaction's frozen data */
 	struct jbd2_buffer_trigger_type *b_frozen_triggers;
+
+	/* CJFS-MVSP */
+	struct b_jh_entry *b_jh_entry[CJFS_MAX_VERSIONS];
+	int b_ver_count;
 };
 
+/* CJFS-MVSP */
+struct b_jh_entry {
+	/* Set until this version's journal I/O has completed. */
+	unsigned long b_io_state;
+	unsigned 				b_jlist;
+	unsigned 				b_modified;
+	char 					*b_frozen_data;
+	char 					*b_committed_data;
+	struct journal_head 			*b_tnext, *b_tprev;
+	struct jbd2_buffer_trigger_type 	*b_triggers, *b_frozen_triggers;
+	transaction_t 				*b_transaction;
+	transaction_t 				*b_next_transaction;
+};
 #endif		/* JOURNAL_HEAD_H_INCLUDED */

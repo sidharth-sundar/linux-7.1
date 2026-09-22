@@ -945,6 +945,11 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	 */
 	tsk->seccomp.filter = NULL;
 #endif
+	/* UFS */
+	tsk->epoch = 0;
+	tsk->__epoch = 0;
+	tsk->barrier_fail = 0;
+	tsk->epoch_fail = 0;
 
 	setup_thread_stack(tsk, orig);
 	clear_user_return_notifier(tsk);

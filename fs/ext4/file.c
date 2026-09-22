@@ -992,6 +992,8 @@ const struct file_operations ext4_file_operations = {
 			  FOP_DIO_PARALLEL_WRITE |
 			  FOP_DONTCACHE,
 	.setlease	= generic_setlease,
+	/* UFS */
+	.fbarrier	= ext4_fbarrier_file,
 };
 
 const struct inode_operations ext4_file_inode_operations = {

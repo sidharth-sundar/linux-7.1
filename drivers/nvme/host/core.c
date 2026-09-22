@@ -1007,6 +1007,9 @@ static inline blk_status_t nvme_setup_rw(struct nvme_ns *ns,
 	if (req->cmd_flags & REQ_RAHEAD)
 		dsmgmt |= NVME_RW_DSM_FREQ_PREFETCH;
 
+	/* UFS */
+	/* Barrier Flag Can be Set */
+
 	if (op == nvme_cmd_write && ns->head->nr_plids) {
 		u16 write_stream = req->bio->bi_write_stream;
 

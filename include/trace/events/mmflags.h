@@ -140,6 +140,7 @@ TRACE_DEFINE_ENUM(___GFP_LAST_BIT);
 #define DEF_PAGEFLAG_NAME(_name) { 1UL <<  PG_##_name, __stringify(_name) }
 
 #define __def_pageflag_names						\
+	DEF_PAGEFLAG_NAME(dispatch),\
 	DEF_PAGEFLAG_NAME(locked),					\
 	DEF_PAGEFLAG_NAME(waiters),					\
 	DEF_PAGEFLAG_NAME(referenced),					\

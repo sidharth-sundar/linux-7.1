@@ -84,6 +84,9 @@ __releases(&journal->j_state_lock)
 			if (journal->j_committing_transaction) {
 				tid = journal->j_committing_transaction->t_tid;
 				has_transaction = true;
+			} else if (journal->j_flushing_transactions) {
+				tid = journal->j_flushing_transactions->t_flushprev->t_tid;
+				has_transaction = true;
 			}
 			spin_unlock(&journal->j_list_lock);
 			write_unlock(&journal->j_state_lock);
@@ -156,7 +159,7 @@ int jbd2_log_do_checkpoint(journal_t *journal)
 	struct journal_head	*jh;
 	struct buffer_head	*bh;
 	transaction_t		*transaction;
-	tid_t			this_tid;
+	tid_t			this_tid, tid;
 	int			result, batch_count = 0;
 
 	jbd2_debug(1, "Start checkpoint\n");
@@ -193,13 +196,24 @@ restart:
 	    transaction->t_tid != this_tid)
 		goto out;
 
+	tid = transaction->t_tid;
+
 	/* checkpoint all of the transaction's buffers */
 	while (transaction->t_checkpoint_list) {
 		jh = transaction->t_checkpoint_list;
 		bh = jh2bh(jh);
 
-		if (jh->b_transaction != NULL) {
-			transaction_t *t = jh->b_transaction;
+		if (buffer_locked(bh)) {
+			get_bh(bh);
+			spin_unlock(&journal->j_list_lock);
+			wait_on_buffer(bh);
+			/* the journal_head may have gone by now */
+			BUFFER_TRACE(bh, "brelse");
+			__brelse(bh);
+			goto retry;
+		}
+		if (jbd2_jh_latest_transaction(jh)) {
+			transaction_t *t = jbd2_jh_latest_transaction(jh);
 			tid_t tid = t->t_tid;
 
 			transaction->t_chp_stats.cs_forced_to_close++;
@@ -639,7 +653,7 @@ int jbd2_journal_try_remove_checkpoint(struct journal_head *jh)
 {
 	struct buffer_head *bh = jh2bh(jh);
 
-	if (jh->b_transaction)
+	if (jbd2_jh_latest_transaction(jh))
 		return -EBUSY;
 	if (!trylock_buffer(bh))
 		return -EBUSY;

@@ -2930,6 +2930,9 @@ extern int ext4_check_all_de(struct inode *dir, struct buffer_head *bh,
 /* fsync.c */
 extern int ext4_sync_file(struct file *, loff_t, loff_t, int);
 
+/* UFS */
+extern int ext4_fbarrier_file(struct file *, loff_t, loff_t, int);
+
 /* hash.c */
 extern int ext4fs_dirhash(const struct inode *dir, const char *name, int len,
 			  struct dx_hash_info *hinfo);

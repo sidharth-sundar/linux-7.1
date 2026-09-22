@@ -223,6 +223,8 @@ static const char *const cmd_flag_name[] = {
 	CMD_FLAG_NAME(FS_PRIVATE),
 	CMD_FLAG_NAME(ATOMIC),
 	CMD_FLAG_NAME(NOUNMAP),
+	CMD_FLAG_NAME(ORDERED),
+	CMD_FLAG_NAME(BARRIER),
 };
 #undef CMD_FLAG_NAME
 

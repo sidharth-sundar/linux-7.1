@@ -33,6 +33,8 @@ struct backing_dev_info;
 enum writeback_sync_modes {
 	WB_SYNC_NONE,	/* Don't wait on anything */
 	WB_SYNC_ALL,	/* Wait on every mapping */
+	WB_ORDERED_ALL, /* UFS */
+	WB_BARRIER_ALL, /* UFS */
 };
 
 /*
@@ -191,7 +193,7 @@ void inode_io_list_del(struct inode *inode);
 
 static inline xa_mark_t wbc_to_tag(struct writeback_control *wbc)
 {
-	if (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages)
+	if (wbc->sync_mode != WB_SYNC_NONE || wbc->tagged_writepages)
 		return PAGECACHE_TAG_TOWRITE;
 	return PAGECACHE_TAG_DIRTY;
 }

@@ -23,6 +23,7 @@
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/jbd2.h>
+#include <trace/events/cjfs.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/init.h>
@@ -97,6 +98,40 @@ EXPORT_SYMBOL(jbd2_inode_cache);
 
 static int jbd2_journal_create_slab(size_t slab_size);
 
+#ifdef DEBUG_PROC_OP
+/* Tx ID, # of Tx Conflict, wait time for Tx Conflict, # of blocks, Flush */
+typedef struct {
+	s64 op_intv[5];
+} op_data;
+
+atomic_t op_index;
+EXPORT_SYMBOL(op_index);
+op_data op_array[4000000];
+EXPORT_SYMBOL(op_array);
+
+/* Conflict Count */
+typedef struct {
+	s64 cc_intv[1];
+} cc_data;
+
+atomic_t cc_index;
+EXPORT_SYMBOL(cc_index);
+cc_data cc_array[4000000];
+EXPORT_SYMBOL(cc_array);
+#endif
+
+#ifdef DEBUG_FSYNC_LATENCY
+/* fsync Latency */
+typedef struct {
+	s64 fsync_intv[5];
+} fsync_data;
+
+atomic_t fsync_index;
+EXPORT_SYMBOL(fsync_index);
+fsync_data fsync_array[4000000];
+EXPORT_SYMBOL(fsync_array);
+#endif
+
 #ifdef CONFIG_JBD2_DEBUG
 void __jbd2_debug(int level, const char *file, const char *func,
 		  unsigned int line, const char *fmt, ...)
@@ -155,6 +190,19 @@ static void commit_timeout(struct timer_list *t)
  *    of the data in that part of the log has been rewritten elsewhere on
  *    the disk.  Flushing these old buffers to reclaim space in the log is
  *    known as checkpointing, and this thread is responsible for that job.
+ *
+ **************************************************************************
+ *
+ * This function is called by the commit thread (jbd2). This function
+ * is modified to be responsible for one thing:
+ *
+ * COMMIT - Dispatch: This function dispatch the journal descriptor block,
+ * log blocks, and the journal commit block. It just dispatches the blocks
+ * and wakeup the flush thread (kjournald2flush) so that the flush thread
+ * waits for the completion of the commands dispatched by the commit thread
+ * and calls the storage flush.
+ *
+ * - 2022. 8. 24. Joontaek Oh.
  */
 
 static int kjournald2(void *arg)
@@ -198,7 +246,11 @@ loop:
 		jbd2_debug(1, "OK, requests differ\n");
 		write_unlock(&journal->j_state_lock);
 		timer_delete_sync(&journal->j_commit_timer);
-		jbd2_journal_commit_transaction(journal);
+
+		jbd2_journal_barrier_commit_transaction(journal);
+
+		wake_up(&journal->j_wait_flush);
+
 		write_lock(&journal->j_state_lock);
 		goto loop;
 	}
@@ -254,6 +306,47 @@ end_loop:
 	return 0;
 }
 
+/*
+ * kjournald2flush: The variant of kjournald2.
+ *
+ * This kernel thread is responsible for two things:
+ *
+ * 1) COMMIT - Flush: It waits  the completions of commands dispatched
+ * by the commit thread: the journal descriptor block, log blocks, and
+ * the journal commit block. And then, it calls the storage flush.
+ *
+ * 2) CHECKPOINT: We cannot reuse a used section of the log file until all
+ *    of the data in that part of the log has been rewritten elsewhere on
+ *    the disk.  Flushing these old buffers to reclaim space in the log is
+ *    known as checkpointing, and this thread is responsible for that job.
+ */
+
+static int kjournald2flush(void *arg)
+{
+	journal_t *journal = arg;
+
+	set_freezable();
+	WRITE_ONCE(journal->j_task_flush, current);
+	wake_up_all(&journal->j_wait_done_flush);
+	memalloc_nofs_save();
+	for (;;) {
+		wait_event_freezable(journal->j_wait_flush,
+			READ_ONCE(journal->j_flushing_transactions) ||
+			(READ_ONCE(journal->j_flags) & JBD2_UNMOUNT));
+		if (READ_ONCE(journal->j_flushing_transactions)) {
+			jbd2_journal_barrier_flush_transaction(journal);
+			continue;
+		}
+		if (READ_ONCE(journal->j_flags) & JBD2_UNMOUNT)
+			break;
+	}
+	write_lock(&journal->j_state_lock);
+	journal->j_task_flush = NULL;
+	write_unlock(&journal->j_state_lock);
+	wake_up_all(&journal->j_wait_done_flush);
+	return 0;
+}
+
 static int jbd2_journal_start_thread(journal_t *journal)
 {
 	struct task_struct *t;
@@ -289,6 +382,44 @@ static inline bool jbd2_data_needs_escaping(char *data)
 static inline void jbd2_data_do_escape(char *data)
 {
 	*((unsigned int *)data) = 0;
+}
+
+/*
+ * This is a variant of jbd2_journal_start_thread.
+ * It starts a flush thread which calls
+ * jbd2_journal_barrier_flush_transaction,
+ * while a commit thread which is started by
+ * jbd2_journal_start_thread calls
+ * jbd2_journal_barrier_commit_transaction.
+ *
+ * - 2022. 8. 23. Joontaek Oh.
+ */
+static int jbd2_journal_start_flush_thread(journal_t *journal)
+{
+	struct task_struct *t;
+
+	t = kthread_run(kjournald2flush, journal, "jbd2flush/%s",
+			journal->j_devname);
+	if (IS_ERR(t))
+		return PTR_ERR(t);
+
+	wait_event(journal->j_wait_done_flush, journal->j_task_flush != NULL);
+	return 0;
+}
+
+
+static void journal_kill_flush_thread(journal_t *journal)
+{
+	write_lock(&journal->j_state_lock);
+	journal->j_flags |= JBD2_UNMOUNT;
+
+	while (journal->j_task_flush) {
+		write_unlock(&journal->j_state_lock);
+		wake_up(&journal->j_wait_flush);
+		wait_event(journal->j_wait_done_flush, journal->j_task_flush == NULL);
+		write_lock(&journal->j_state_lock);
+	}
+	write_unlock(&journal->j_state_lock);
 }
 
 /*
@@ -333,6 +464,8 @@ int jbd2_journal_write_metadata_buffer(transaction_t *transaction,
 	unsigned int new_offset;
 	struct buffer_head *bh_in = jh2bh(jh_in);
 	journal_t *journal = transaction->t_journal;
+	/* CJFS */
+	tid_t ver_tid = jbd2_cjfs_slot(transaction);
 
 	/*
 	 * The buffer really shouldn't be locked: only the current committing
@@ -343,7 +476,7 @@ int jbd2_journal_write_metadata_buffer(transaction_t *transaction,
 	 * also part of a shared mapping, and another thread has
 	 * decided to launch a writepage() against this buffer.
 	 */
-	J_ASSERT_BH(bh_in, buffer_jbddirty(bh_in));
+	// J_ASSERT_BH(bh_in, buffer_jbddirty(bh_in));
 
 	new_bh = alloc_buffer_head(GFP_NOFS|__GFP_NOFAIL);
 
@@ -355,12 +488,12 @@ int jbd2_journal_write_metadata_buffer(transaction_t *transaction,
 	 * If a new transaction has already done a buffer copy-out, then
 	 * we use that version of the data for the commit.
 	 */
-	if (jh_in->b_frozen_data) {
-		new_folio = virt_to_folio(jh_in->b_frozen_data);
-		new_offset = offset_in_folio(new_folio, jh_in->b_frozen_data);
-		do_escape = jbd2_data_needs_escaping(jh_in->b_frozen_data);
+	if (jh_in->b_jh_entry[ver_tid]->b_frozen_data) {
+		new_folio = virt_to_folio(jh_in->b_jh_entry[ver_tid]->b_frozen_data);
+		new_offset = offset_in_folio(new_folio, jh_in->b_jh_entry[ver_tid]->b_frozen_data);
+		do_escape = jbd2_data_needs_escaping(jh_in->b_jh_entry[ver_tid]->b_frozen_data);
 		if (do_escape)
-			jbd2_data_do_escape(jh_in->b_frozen_data);
+			jbd2_data_do_escape(jh_in->b_jh_entry[ver_tid]->b_frozen_data);
 	} else {
 		char *tmp;
 		char *mapped_data;
@@ -375,36 +508,40 @@ int jbd2_journal_write_metadata_buffer(transaction_t *transaction,
 		 * have the correct data in the buffer.
 		 */
 		jbd2_buffer_frozen_trigger(jh_in, mapped_data,
-					   jh_in->b_triggers);
+					   jh_in->b_jh_entry[ver_tid]->b_triggers);
 		do_escape = jbd2_data_needs_escaping(mapped_data);
 		kunmap_local(mapped_data);
 		/*
 		 * Do we need to do a data copy?
 		 */
-		if (!do_escape)
+		if (!do_escape && !transaction->t_cjfs_eager)
 			goto escape_done;
 
 		spin_unlock(&jh_in->b_state_lock);
 		tmp = jbd2_alloc(bh_in->b_size, GFP_NOFS | __GFP_NOFAIL);
 		spin_lock(&jh_in->b_state_lock);
-		if (jh_in->b_frozen_data) {
+		if (jh_in->b_jh_entry[ver_tid]->b_frozen_data) {
 			jbd2_free(tmp, bh_in->b_size);
 			goto copy_done;
 		}
 
-		jh_in->b_frozen_data = tmp;
+		jh_in->b_jh_entry[ver_tid]->b_frozen_data = tmp;
 		memcpy_from_folio(tmp, new_folio, new_offset, bh_in->b_size);
+		trace_cjfs_event(journal->j_fs_dev->bd_dev, transaction->t_tid,
+			transaction->t_cjfs_generation,
+			do_escape ? "escape_copy" : "eager_copy", bh_in->b_size);
 		/*
 		 * This isn't strictly necessary, as we're using frozen
 		 * data for the escaping, but it keeps consistency with
 		 * b_frozen_data usage.
 		 */
-		jh_in->b_frozen_triggers = jh_in->b_triggers;
+		jh_in->b_jh_entry[ver_tid]->b_frozen_triggers = jh_in->b_jh_entry[ver_tid]->b_triggers;
 
 copy_done:
-		new_folio = virt_to_folio(jh_in->b_frozen_data);
-		new_offset = offset_in_folio(new_folio, jh_in->b_frozen_data);
-		jbd2_data_do_escape(jh_in->b_frozen_data);
+		new_folio = virt_to_folio(jh_in->b_jh_entry[ver_tid]->b_frozen_data);
+		new_offset = offset_in_folio(new_folio, jh_in->b_jh_entry[ver_tid]->b_frozen_data);
+		if (do_escape)
+			jbd2_data_do_escape(jh_in->b_jh_entry[ver_tid]->b_frozen_data);
 	}
 
 escape_done:
@@ -413,6 +550,9 @@ escape_done:
 	new_bh->b_bdev = journal->j_dev;
 	new_bh->b_blocknr = blocknr;
 	new_bh->b_private = bh_in;
+	new_bh->b_cjfs_io_entry = jh_in->b_jh_entry[ver_tid];
+	J_ASSERT_BH(new_bh, !test_bit(0, &new_bh->b_cjfs_io_entry->b_io_state));
+	set_bit(0, &new_bh->b_cjfs_io_entry->b_io_state);
 	set_buffer_mapped(new_bh);
 	set_buffer_dirty(new_bh);
 
@@ -511,7 +651,12 @@ static int __jbd2_journal_force_commit(journal_t *journal)
 		transaction = journal->j_committing_transaction;
 
 	if (!transaction) {
-		/* Nothing to commit */
+		tid = journal->j_commit_sequence;
+		if (tid_gt(tid, journal->j_flush_sequence)) {
+			read_unlock(&journal->j_state_lock);
+			ret = jbd2_log_wait_commit(journal, tid);
+			return ret ? ret : 1;
+		}
 		read_unlock(&journal->j_state_lock);
 		return 0;
 	}
@@ -588,6 +733,11 @@ int jbd2_journal_start_commit(journal_t *journal, tid_t *ptid)
 		 */
 		if (ptid)
 			*ptid = journal->j_committing_transaction->t_tid;
+		ret = 1;
+	}
+	if (!ret && tid_gt(journal->j_commit_sequence, journal->j_flush_sequence)) {
+		if (ptid)
+			*ptid = journal->j_commit_sequence;
 		ret = 1;
 	}
 	write_unlock(&journal->j_state_lock);
@@ -675,13 +825,14 @@ int jbd2_log_wait_commit(journal_t *journal, tid_t tid)
 		       __func__, journal->j_commit_request, tid);
 	}
 #endif
-	while (tid_gt(tid, journal->j_commit_sequence)) {
-		jbd2_debug(1, "JBD2: want %u, j_commit_sequence=%u\n",
-				  tid, journal->j_commit_sequence);
+	while (tid_gt(tid, journal->j_flush_sequence)) {
+		jbd2_debug(1, "JBD2: want %u, j_flush_sequence=%u\n",
+				  tid, journal->j_flush_sequence);
 		read_unlock(&journal->j_state_lock);
 		wake_up(&journal->j_wait_commit);
-		wait_event(journal->j_wait_done_commit,
-				!tid_gt(tid, journal->j_commit_sequence));
+		wake_up(&journal->j_wait_flush);
+		wait_event(journal->j_wait_done_flush,
+				!tid_gt(tid, journal->j_flush_sequence));
 		read_lock(&journal->j_state_lock);
 	}
 	read_unlock(&journal->j_state_lock);
@@ -703,33 +854,10 @@ int jbd2_fc_begin_commit(journal_t *journal, tid_t tid)
 	if (unlikely(is_journal_aborted(journal)))
 		return -EIO;
 	/*
-	 * Fast commits only allowed if at least one full commit has
-	 * been processed.
+	 * The FC area and its global state assume one full commit in flight.
+	 * Force the ext4 caller's full-commit fallback on this CJFS prototype.
 	 */
-	if (!journal->j_stats.ts_tid)
-		return -EINVAL;
-
-	write_lock(&journal->j_state_lock);
-	if (tid_geq(journal->j_commit_sequence, tid)) {
-		write_unlock(&journal->j_state_lock);
-		return -EALREADY;
-	}
-
-	if (journal->j_flags & JBD2_FULL_COMMIT_ONGOING ||
-	    (journal->j_flags & JBD2_FAST_COMMIT_ONGOING)) {
-		DEFINE_WAIT(wait);
-
-		prepare_to_wait(&journal->j_fc_wait, &wait,
-				TASK_UNINTERRUPTIBLE);
-		write_unlock(&journal->j_state_lock);
-		schedule();
-		finish_wait(&journal->j_fc_wait, &wait);
-		return -EALREADY;
-	}
-	journal->j_flags |= JBD2_FAST_COMMIT_ONGOING;
-	write_unlock(&journal->j_state_lock);
-
-	return 0;
+	return -EOPNOTSUPP;
 }
 EXPORT_SYMBOL(jbd2_fc_begin_commit);
 
@@ -773,7 +901,7 @@ EXPORT_SYMBOL(jbd2_fc_end_commit_fallback);
 /* Return 1 when transaction with given tid has already committed. */
 int jbd2_transaction_committed(journal_t *journal, tid_t tid)
 {
-	return tid_geq(READ_ONCE(journal->j_commit_sequence), tid);
+	return tid_geq(READ_ONCE(journal->j_flush_sequence), tid);
 }
 EXPORT_SYMBOL(jbd2_transaction_committed);
 
@@ -798,8 +926,13 @@ int jbd2_complete_transaction(journal_t *journal, tid_t tid)
 			goto wait_commit;
 		}
 	} else if (!(journal->j_committing_transaction &&
-		     journal->j_committing_transaction->t_tid == tid))
-		need_to_wait = 0;
+		     journal->j_committing_transaction->t_tid == tid)) {
+		if (tid_geq(journal->j_flush_sequence, tid))
+			need_to_wait = 0;
+		else
+			wake_up(&journal->j_wait_flush);
+		// need_to_wait = 0;
+	}
 	read_unlock(&journal->j_state_lock);
 	if (!need_to_wait)
 		return 0;
@@ -1026,6 +1159,9 @@ int jbd2_journal_get_log_tail(journal_t *journal, tid_t *tid,
 	if (transaction) {
 		*tid = transaction->t_tid;
 		*block = transaction->t_log_start;
+	} else if ((transaction = journal->j_flushing_transactions) != NULL) {
+		*tid = transaction->t_tid;
+		*block = transaction->t_log_start;
 	} else if ((transaction = journal->j_committing_transaction) != NULL) {
 		*tid = transaction->t_tid;
 		*block = transaction->t_log_start;
@@ -1210,6 +1346,145 @@ static int jbd2_seq_info_release(struct inode *inode, struct file *file)
 	return seq_release(inode, file);
 }
 
+#ifdef DEBUG_PROC_OP
+static int jbd2_op_show(struct seq_file *seq, void *v)
+{
+	static int cnt = 0;
+	int end = atomic_read(&op_index);
+	int i = 0;
+
+	for (i = 0; i < 100; i++) {
+		seq_printf(seq,"%d %d %llu %llu %llu %llu %llu\n",
+			end,
+			cnt,
+			op_array[cnt].op_intv[0],
+			op_array[cnt].op_intv[1],
+			op_array[cnt].op_intv[2],
+			op_array[cnt].op_intv[3],
+			op_array[cnt].op_intv[4]);
+
+		op_array[cnt].op_intv[0] = 0;
+		cnt++;
+
+		if (cnt == end || cnt >= 4000000 || end == 0) {
+			seq_printf(seq, "END\n");
+			cnt = 0;
+			break;
+		}
+	}
+	return 0;
+}
+
+static int jbd2_op_release(struct inode *inode, struct file *file)
+{
+	return single_release(inode,file);
+}
+
+static int jbd2_op_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, jbd2_op_show, pde_data(inode));
+}
+
+static const struct proc_ops jbd2_op_proc_ops = {
+	.proc_open 	= jbd2_op_open,
+	.proc_read      = seq_read,
+	.proc_lseek     = seq_lseek,
+	.proc_release   = jbd2_op_release,
+};
+
+static int jbd2_cc_show(struct seq_file *seq, void *v)
+{
+	static int cnt = 0;
+	int end = atomic_read(&cc_index);
+	int i = 0;
+
+	for (i = 0; i < 100; i++) {
+		seq_printf(seq,"%d %d %llu\n",
+			end,
+			cnt,
+			cc_array[cnt].cc_intv[0]);
+
+		cc_array[cnt].cc_intv[0] = 0;
+		cnt++;
+
+		if (cnt == end || cnt >= 4000000 || end == 0) {
+			seq_printf(seq, "END\n");
+			cnt = 0;
+			break;
+		}
+	}
+	return 0;
+}
+
+static int jbd2_cc_release(struct inode *inode, struct file *file)
+{
+	return single_release(inode,file);
+}
+
+static int jbd2_cc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, jbd2_cc_show, pde_data(inode));
+}
+
+static const struct proc_ops jbd2_cc_proc_ops = {
+	.proc_open 	= jbd2_cc_open,
+	.proc_read      = seq_read,
+	.proc_lseek     = seq_lseek,
+	.proc_release   = jbd2_cc_release,
+};
+#endif
+
+#ifdef DEBUG_FSYNC_LATENCY
+static int jbd2_fsync_show(struct seq_file *seq, void *v)
+{
+	static unsigned long cnt = 0;
+	unsigned long end = atomic_read(&fsync_index);
+	unsigned long i = 0;
+
+	for (i = 0; i < 100; i++) {
+		seq_printf(seq,"%d %d %llu %llu %llu %llu %llu\n",
+			end,
+			cnt,
+			fsync_array[cnt].fsync_intv[0],
+			fsync_array[cnt].fsync_intv[1],
+			fsync_array[cnt].fsync_intv[2],
+			fsync_array[cnt].fsync_intv[3],
+			fsync_array[cnt].fsync_intv[4]);
+
+		fsync_array[cnt].fsync_intv[0] = 0;
+		fsync_array[cnt].fsync_intv[1] = 0;
+		fsync_array[cnt].fsync_intv[2] = 0;
+		fsync_array[cnt].fsync_intv[3] = 0;
+		fsync_array[cnt].fsync_intv[4] = 0;
+		cnt++;
+
+		if (cnt == end || cnt >= 4000000 || end == 0) {
+			seq_printf(seq, "END\n");
+			cnt = 0;
+			break;
+		}
+	}
+	return 0;
+}
+
+static int jbd2_fsync_release(struct inode *inode, struct file *file)
+{
+	return single_release(inode,file);
+}
+
+static int jbd2_fsync_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, jbd2_fsync_show, pde_data(inode));
+}
+
+static const struct proc_ops jbd2_fsync_proc_ops = {
+	.proc_open 	= jbd2_fsync_open,
+	.proc_read      = seq_read,
+	.proc_lseek     = seq_lseek,
+	.proc_release   = jbd2_fsync_release,
+};
+#endif
+
 static const struct proc_ops jbd2_info_proc_ops = {
 	.proc_open	= jbd2_seq_info_open,
 	.proc_read	= seq_read,
@@ -1225,12 +1500,29 @@ static void jbd2_stats_proc_init(journal_t *journal)
 	if (journal->j_proc_entry) {
 		proc_create_data("info", S_IRUGO, journal->j_proc_entry,
 				 &jbd2_info_proc_ops, journal);
+#ifdef DEBUG_PROC_OP
+		proc_create_data("op", S_IRUGO, journal->j_proc_entry,
+				 &jbd2_op_proc_ops, journal);
+		proc_create_data("cc", S_IRUGO, journal->j_proc_entry,
+				 &jbd2_cc_proc_ops, journal);
+#endif
+#ifdef DEBUG_FSYNC_LATENCY
+		proc_create_data("fsync", S_IRUGO, journal->j_proc_entry,
+				 &jbd2_fsync_proc_ops, journal);
+#endif
 	}
 }
 
 static void jbd2_stats_proc_exit(journal_t *journal)
 {
 	remove_proc_entry("info", journal->j_proc_entry);
+#ifdef DEBUG_PROC_OP
+	remove_proc_entry("info", journal->j_proc_entry);
+	remove_proc_entry("cc", journal->j_proc_entry);
+#endif
+#ifdef DEBUG_FSYNC_LATENCY
+	remove_proc_entry("fsync", journal->j_proc_entry);
+#endif
 	remove_proc_entry(journal->j_devname, proc_jbd2_stats);
 }
 
@@ -1525,6 +1817,7 @@ static journal_t *journal_init_common(struct block_device *bdev,
 	int err;
 	int n;
 
+
 	journal = kzalloc_obj(*journal);
 	if (!journal)
 		return ERR_PTR(-ENOMEM);
@@ -1543,16 +1836,22 @@ static journal_t *journal_init_common(struct block_device *bdev,
 
 	init_waitqueue_head(&journal->j_wait_transaction_locked);
 	init_waitqueue_head(&journal->j_wait_done_commit);
+	init_waitqueue_head(&journal->j_wait_done_flush);
 	init_waitqueue_head(&journal->j_wait_commit);
+	init_waitqueue_head(&journal->j_wait_flush);
 	init_waitqueue_head(&journal->j_wait_updates);
 	init_waitqueue_head(&journal->j_wait_reserved);
 	init_waitqueue_head(&journal->j_fc_wait);
 	mutex_init(&journal->j_abort_mutex);
+	mutex_init(&journal->j_cjfs_config_mutex);
+	journal->j_cjfs_depth = journal->j_cjfs_pending_depth = 1;
+	journal->j_cjfs_generation = 1;
 	mutex_init(&journal->j_barrier);
 	mutex_init(&journal->j_checkpoint_mutex);
 	spin_lock_init(&journal->j_revoke_lock);
 	spin_lock_init(&journal->j_list_lock);
 	spin_lock_init(&journal->j_history_lock);
+	spin_lock_init(&journal->j_flush_list_lock);
 	rwlock_init(&journal->j_state_lock);
 
 	journal->j_commit_interval = (HZ * JBD2_DEFAULT_MAX_COMMIT_AGE);
@@ -1603,6 +1902,13 @@ static journal_t *journal_init_common(struct block_device *bdev,
 
 	shrinker_register(journal->j_shrinker);
 
+#ifdef DEBUG_PROC_OP
+	atomic_set(&op_index, 0);
+	atomic_set(&cc_index, 0);
+#endif
+#ifdef DEBUG_FSYNC_LATENCY
+	atomic_set(&fsync_index, 0);
+#endif
 	return journal;
 
 err_cleanup:
@@ -1707,6 +2013,7 @@ static int journal_reset(journal_t *journal)
 {
 	journal_superblock_t *sb = journal->j_superblock;
 	unsigned long long first, last;
+	int ret = 0;
 
 	first = be32_to_cpu(sb->s_first);
 	last = be32_to_cpu(sb->s_maxlen);
@@ -1741,6 +2048,9 @@ static int journal_reset(journal_t *journal)
 	journal->j_commit_sequence = journal->j_transaction_sequence - 1;
 	journal->j_commit_request = journal->j_commit_sequence;
 
+	journal->j_transfer_sequence = journal->j_commit_sequence;
+	journal->j_flush_sequence = journal->j_commit_sequence;
+
 	/*
 	 * Now that journal recovery is done, turn fast commits off here. This
 	 * way, if fast commit was enabled before the crash but if now FS has
@@ -1774,7 +2084,14 @@ static int journal_reset(journal_t *journal)
 						journal->j_tail, REQ_FUA);
 		mutex_unlock(&journal->j_checkpoint_mutex);
 	}
-	return jbd2_journal_start_thread(journal);
+
+	ret = jbd2_journal_start_flush_thread(journal);
+	if (ret)
+		return ret;
+	ret = jbd2_journal_start_thread(journal);
+	if (ret)
+		journal_kill_flush_thread(journal);
+	return ret;
 }
 
 /*
@@ -2118,12 +2435,15 @@ int jbd2_journal_destroy(journal_t *journal)
 {
 	int err = 0;
 
+	/* Drain the concurrent pipeline before either worker can exit. */
+	if (journal->j_task && journal->j_task_flush)
+		err = jbd2_journal_flush(journal, 0);
+
 	/* Wait for the commit thread to wake up and die. */
 	journal_kill_thread(journal);
+	journal_kill_flush_thread(journal);
 
-	/* Force a final log commit */
-	if (journal->j_running_transaction)
-		jbd2_journal_commit_transaction(journal);
+	WARN_ON_ONCE(journal->j_running_transaction);
 
 	/* Force any old transactions to disk */
 
@@ -2435,10 +2755,13 @@ int jbd2_journal_flush(journal_t *journal, unsigned int flags)
 		tid_t tid = transaction->t_tid;
 
 		write_unlock(&journal->j_state_lock);
-		jbd2_log_wait_commit(journal, tid);
+		err = jbd2_log_wait_commit(journal, tid);
 	} else {
 		write_unlock(&journal->j_state_lock);
 	}
+
+	if (!err)
+		err = jbd2_log_wait_commit(journal, READ_ONCE(journal->j_commit_sequence));
 
 	/* ...and flush everything in the log out to disk. */
 	spin_lock(&journal->j_list_lock);
@@ -2830,6 +3153,33 @@ static void jbd2_journal_destroy_journal_head_cache(void)
 	jbd2_journal_head_cache = NULL;
 }
 
+/* CJFS */
+static struct kmem_cache *jbd2_journal_head_entry_cache;
+
+static int __init jbd2_journal_init_journal_head_entry_cache(void)
+{
+	J_ASSERT(!jbd2_journal_head_entry_cache);
+	jbd2_journal_head_entry_cache = kmem_cache_create("jbd2_journal_head_entry",
+				sizeof(struct b_jh_entry),
+				0,              /* offset */
+				SLAB_TEMPORARY | SLAB_TYPESAFE_BY_RCU,
+				NULL);          /* ctor */
+	if (!jbd2_journal_head_entry_cache) {
+		printk(KERN_EMERG "JBD2: no memory for journal_head_entry cache\n");
+		return -ENOMEM;
+	}
+	return 0;
+}
+
+static void jbd2_journal_destroy_journal_head_entry_cache(void)
+{
+	kmem_cache_destroy(jbd2_journal_head_entry_cache);
+	jbd2_journal_head_entry_cache = NULL;
+}
+
+/* CJFS */
+static struct b_jh_entry *journal_alloc_journal_head_entry(void);
+static void journal_free_journal_head_entry(struct b_jh_entry *jh_entry);
 /*
  * journal_head splicing and dicing
  */
@@ -2853,11 +3203,39 @@ static struct journal_head *journal_alloc_journal_head(void)
 
 static void journal_free_journal_head(struct journal_head *jh)
 {
+	/* CJFS */
+	int ver = 0;
+
+	/* CJFS */
+	for (ver = 0; ver < CJFS_MAX_VERSIONS; ver++) {
+		if (jh->b_jh_entry[ver] != NULL)
+			journal_free_journal_head_entry(jh->b_jh_entry[ver]);
+	}
 #ifdef CONFIG_JBD2_DEBUG
 	atomic_dec(&nr_journal_heads);
 	memset(jh, JBD2_POISON_FREE, sizeof(*jh));
 #endif
 	kmem_cache_free(jbd2_journal_head_cache, jh);
+}
+
+/* CJFS */
+static struct b_jh_entry *journal_alloc_journal_head_entry(void)
+{
+	struct b_jh_entry *ret;
+
+	ret = kmem_cache_zalloc(jbd2_journal_head_entry_cache, GFP_NOFS);
+	if (!ret) {
+		jbd2_debug(1, "out of memory for journal_head_entry\n");
+		pr_notice_ratelimited("ENOMEM in %s, retrying.\n", __func__);
+		ret = kmem_cache_zalloc(jbd2_journal_head_entry_cache,
+				GFP_NOFS | __GFP_NOFAIL);
+	}
+	return ret;
+}
+
+static void journal_free_journal_head_entry(struct b_jh_entry *jh_entry)
+{
+	kmem_cache_free(jbd2_journal_head_entry_cache, jh_entry);
 }
 
 /*
@@ -2905,6 +3283,9 @@ struct journal_head *jbd2_journal_add_journal_head(struct buffer_head *bh)
 {
 	struct journal_head *jh;
 	struct journal_head *new_jh = NULL;
+	/* CJFS */
+	struct b_jh_entry *new_jh_entry = NULL;
+	int ver = 0;
 
 repeat:
 	if (!buffer_jbd(bh))
@@ -2926,8 +3307,19 @@ repeat:
 		jh = new_jh;
 		new_jh = NULL;		/* We consumed it */
 		set_buffer_jbd(bh);
+		/* CJFS */
+		for (ver = 0; ver < CJFS_MAX_VERSIONS; ver++) {
+			new_jh_entry = journal_alloc_journal_head_entry();
+			jh->b_jh_entry[ver] = new_jh_entry;
+			new_jh_entry = NULL;
+		}
+
 		bh->b_private = jh;
 		jh->b_bh = bh;
+
+		/* CJFS */
+		jh->b_ver_count = 0;
+
 		get_bh(bh);
 		BUFFER_TRACE(bh, "added journal_head");
 	}
@@ -2959,30 +3351,41 @@ EXPORT_SYMBOL(jbd2_journal_grab_journal_head);
 static void __journal_remove_journal_head(struct buffer_head *bh)
 {
 	struct journal_head *jh = bh2jh(bh);
+	/* CJFS */
+	int count;
 
-	J_ASSERT_JH(jh, jh->b_transaction == NULL);
-	J_ASSERT_JH(jh, jh->b_next_transaction == NULL);
 	J_ASSERT_JH(jh, jh->b_cp_transaction == NULL);
-	J_ASSERT_JH(jh, jh->b_jlist == BJ_None);
 	J_ASSERT_BH(bh, buffer_jbd(bh));
 	J_ASSERT_BH(bh, jh2bh(jh) == bh);
-	BUFFER_TRACE(bh, "remove journal_head");
+	/* CJFS */
+	for (count = 0; count < CJFS_MAX_VERSIONS; count++) {
+		J_ASSERT_JH(jh, jh->b_jh_entry[count]->b_transaction == NULL);
+		J_ASSERT_JH(jh, jh->b_jh_entry[count]->b_next_transaction == NULL);
+		J_ASSERT_JH(jh, jh->b_jh_entry[count]->b_jlist == BJ_None);
+
+		BUFFER_TRACE(bh, "remove journal_head");
+	}
 
 	/* Unlink before dropping the lock */
 	bh->b_private = NULL;
-	jh->b_bh = NULL;	/* debug, really */
+	jh->b_bh = NULL;	// debug, really
 	clear_buffer_jbd(bh);
 }
 
 static void journal_release_journal_head(struct journal_head *jh, size_t b_size)
 {
-	if (jh->b_frozen_data) {
-		printk(KERN_WARNING "%s: freeing b_frozen_data\n", __func__);
-		jbd2_free(jh->b_frozen_data, b_size);
-	}
-	if (jh->b_committed_data) {
-		printk(KERN_WARNING "%s: freeing b_committed_data\n", __func__);
-		jbd2_free(jh->b_committed_data, b_size);
+	/* CJFS */
+	int count;
+	/* CJFS */
+	for (count = 0; count < CJFS_MAX_VERSIONS; count++) {
+		if (jh->b_jh_entry[count]->b_frozen_data) {
+			// printk(KERN_WARNING "%s: freeing b_frozen_data\n", __func__);
+			jbd2_free(jh->b_jh_entry[count]->b_frozen_data, b_size);
+		}
+		if (jh->b_jh_entry[count]->b_committed_data) {
+			// printk(KERN_WARNING "%s: freeing b_committed_data\n", __func__);
+			jbd2_free(jh->b_jh_entry[count]->b_committed_data, b_size);
+		}
 	}
 	journal_free_journal_head(jh);
 }
@@ -3127,6 +3530,8 @@ static int __init journal_init_caches(void)
 	if (ret == 0)
 		ret = jbd2_journal_init_journal_head_cache();
 	if (ret == 0)
+		ret = jbd2_journal_init_journal_head_entry_cache();
+	if (ret == 0)
 		ret = jbd2_journal_init_handle_cache();
 	if (ret == 0)
 		ret = jbd2_journal_init_inode_cache();
@@ -3140,6 +3545,7 @@ static void jbd2_journal_destroy_caches(void)
 	jbd2_journal_destroy_revoke_record_cache();
 	jbd2_journal_destroy_revoke_table_cache();
 	jbd2_journal_destroy_journal_head_cache();
+	jbd2_journal_destroy_journal_head_entry_cache();
 	jbd2_journal_destroy_handle_cache();
 	jbd2_journal_destroy_inode_cache();
 	jbd2_journal_destroy_transaction_cache();

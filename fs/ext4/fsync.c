@@ -24,6 +24,7 @@
  */
 
 #include <linux/time.h>
+#include <linux/jbd2.h> /* CJFS - debug */
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/writeback.h>
@@ -139,11 +140,30 @@ static int ext4_fsync_journal(struct inode *inode, bool datasync,
  * What we do is just kick off a commit and wait on it.  This will snapshot the
  * inode to disk.
  */
+#ifdef DEBUG_FSYNC_LATENCY
+typedef struct {
+	s64 fsync_intv[5];
+} fsync_data;
+
+extern fsync_data fsync_array[4000000];
+extern atomic_t fsync_index;
+#endif
 int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	int ret = 0, err;
 	bool needs_barrier = false;
 	struct inode *inode = file->f_mapping->host;
+
+#ifdef DEBUG_FSYNC_LATENCY
+	ktime_t start1, end1;
+	fsync_data temp;
+	int j = 0, seq = 0;
+
+	for (j = 0; j < 5; j++) {
+		temp.fsync_intv[j] = 0;
+	}
+	start1 = ktime_get();
+#endif
 
 	ret = ext4_emergency_state(inode->i_sb);
 	if (unlikely(ret))
@@ -164,9 +184,19 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 		goto out;
 	}
 
-	ret = file_write_and_wait_range(file, start, end);
+	/* UFS */
+	// trace_ext4_sync_file_data_start(inode, datasync);
+	//printk(KERN_INFO "[SWDBG] (%s) sync_start! pid : %d, tid : %d\n"
+	//	,__func__,task_pid(current),commit_tid);
+
+	if (datasync)
+		ret = file_write_and_wait_range(file, start, end);
+	else
+		ret = filemap_write_and_dispatch_range(file->f_mapping, start, end);
 	if (ret)
 		goto out;
+
+	// trace_ext4_sync_file_data_complete(inode, datasync);
 
 	/*
 	 *  The caller's filemap_fdatawrite()/wait will sync the data.
@@ -180,6 +210,90 @@ issue_flush:
 		err = blkdev_issue_flush(inode->i_sb->s_bdev);
 		if (!ret)
 			ret = err;
+	}
+
+	// commit_tid = datasync ? ei->i_datasync_tid : ei->i_sync_tid;
+	//printk(KERN_INFO "[SWDBG] (%s) sync_end! pid : %d, tid : %d\n"
+	//	,__func__,task_pid(current),commit_tid);
+out:
+	err = file_check_and_advance_wb_err(file);
+	if (ret == 0)
+		ret = err;
+	trace_ext4_sync_file_exit(inode, ret);
+#ifdef DEBUG_FSYNC_LATENCY
+	end1 = ktime_get();
+	seq = atomic_add_return(1, &fsync_index);
+	if (seq >= 4000000)
+		return ret;
+	temp.fsync_intv[0] += ktime_to_ns(ktime_sub(end1,start1));
+	for (j = 0; j < 1; j++) {
+		fsync_array[seq-1].fsync_intv[j] = temp.fsync_intv[j];
+	}
+	fsync_array[seq-1].fsync_intv[1] = temp.fsync_intv[1];
+	fsync_array[seq-1].fsync_intv[2] = temp.fsync_intv[2];
+	fsync_array[seq-1].fsync_intv[3] = temp.fsync_intv[3];
+	fsync_array[seq-1].fsync_intv[4] = temp.fsync_intv[4];
+#endif
+	return ret;
+}
+
+/* UFS */
+int ext4_fbarrier_file(struct file *file, loff_t start, loff_t end, int datasync)
+{
+	int ret = 0, err;
+	bool needs_barrier = false;
+	struct inode *inode = file->f_mapping->host;
+	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
+
+	if (unlikely(ext4_forced_shutdown(inode->i_sb)))
+		return -EIO;
+
+	ASSERT(ext4_journal_current_handle() == NULL);
+
+	trace_ext4_sync_file_enter(file, datasync);
+
+	if (sb_rdonly(inode->i_sb)) {
+		/* Make sure that we read updated s_mount_flags value */
+		smp_rmb();
+		if (ext4_forced_shutdown(inode->i_sb))
+			ret = -EROFS;
+		goto out;
+	}
+
+	if (datasync) {
+		current->barrier_fail = 0;
+		ret = filemap_ordered_write_range(file->f_mapping, start, end);
+		if (current->barrier_fail)
+			needs_barrier = true;
+		filemap_fdatadispatch_range(file->f_mapping, start, end);
+	}
+	else
+		ret = filemap_write_and_dispatch_range(file->f_mapping, start, end);
+	if (ret)
+		goto out;
+
+	/*
+	 * data=writeback,ordered:
+	 *  The caller's filemap_fdatawrite()/wait will sync the data.
+	 *  Metadata is in the journal, we wait for proper transaction to
+	 *  commit here.
+	 *
+	 * data=journal:
+	 *  filemap_fdatawrite won't do anything (the buffers are clean).
+	 *  ext4_force_commit will write the file data into the journal and
+	 *  will wait on that.
+	 *  filemap_fdatawait() will encounter a ton of newly-dirtied pages
+	 *  (they were dirtied by commit).  But that's OK - the blocks are
+	 *  safe in-journal, which is all fsync() needs to ensure.
+	 */
+	if (!sbi->s_journal)
+		ret = ext4_fsync_nojournal(file, start, end, datasync, &needs_barrier);
+	else if (ext4_should_journal_data(inode))
+		ret = ext4_force_commit(inode->i_sb);
+	else {/* Need to be modified after Dual Mode Journaling is ported */
+		if (datasync && needs_barrier)
+			current->barrier_fail = 0;
+		// ret = ext4_fsync_journal(inode, datasync, &needs_barrier);
 	}
 out:
 	err = file_check_and_advance_wb_err(file);

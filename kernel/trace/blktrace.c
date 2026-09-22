@@ -1431,6 +1431,12 @@ static void fill_rwbs(char *rwbs, const struct blk_io_trace2 *t)
 		rwbs[i++] = 'S';
 	if (tc & BLK_TC_META)
 		rwbs[i++] = 'M';
+
+	/* UFS */
+	if (tc & BLK_TC_ORDERED)
+		rwbs[i++] = 'O';
+	if (tc & BLK_TC_BARRIER)
+		rwbs[i++] = 'B';
 out:
 	rwbs[i] = '\0';
 }
@@ -1981,6 +1987,8 @@ static const struct {
 	{ BLK_TC_DRV_DATA,	"drv_data"	},
 	{ BLK_TC_FUA,		"fua"		},
 	{ BLK_TC_WRITE_ZEROES,	"write-zeroes"	},
+	{ BLK_TC_ORDERED,	"ordered"	},
+	{ BLK_TC_BARRIER,	"barrier"	},
 };
 
 static int blk_trace_str2mask(const char *str)
@@ -2211,6 +2219,12 @@ void blk_fill_rwbs(char *rwbs, blk_opf_t opf)
 		rwbs[i++] = 'S';
 	if (opf & REQ_META)
 		rwbs[i++] = 'M';
+
+	/* UFS */
+	if (opf & REQ_ORDERED)
+		rwbs[i++] = 'O';
+	if (opf & REQ_BARRIER)
+		rwbs[i++] = 'B';
 	if (opf & REQ_ATOMIC)
 		rwbs[i++] = 'U';
 

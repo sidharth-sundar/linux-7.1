@@ -632,6 +632,18 @@ static int blkdev_fsync(struct file *filp, loff_t start, loff_t end,
 	return error;
 }
 
+static int blkdev_fbarrier(struct file *filp, loff_t start, loff_t end,
+		int datasync)
+{
+	int error;
+
+	error = filemap_ordered_write_range(filp->f_mapping, start, end);
+	filemap_fdatadispatch_range(filp->f_mapping, start, end);
+
+	return error;
+}
+
+
 /**
  * file_to_blk_mode - get block open flags from file flags
  * @file: file whose open flags should be converted
@@ -958,6 +970,7 @@ const struct file_operations def_blk_fops = {
 	.iopoll		= iocb_bio_iopoll,
 	.mmap_prepare	= blkdev_mmap_prepare,
 	.fsync		= blkdev_fsync,
+	.fbarrier	= blkdev_fbarrier,
 	.unlocked_ioctl	= blkdev_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= compat_blkdev_ioctl,

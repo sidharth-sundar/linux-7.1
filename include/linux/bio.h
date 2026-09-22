@@ -431,6 +431,7 @@ static inline void bio_init_inline(struct bio *bio, struct block_device *bdev,
 extern void bio_uninit(struct bio *);
 void bio_reset(struct bio *bio, struct block_device *bdev, blk_opf_t opf);
 void bio_reuse(struct bio *bio, blk_opf_t opf);
+void bio_chain_endio(struct bio *bio);
 void bio_chain(struct bio *, struct bio *);
 void bio_await(struct bio *bio, void *priv,
 	       void (*submit)(struct bio *bio, void *priv));

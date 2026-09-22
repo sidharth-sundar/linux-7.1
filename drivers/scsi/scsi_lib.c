@@ -1932,6 +1932,7 @@ static blk_status_t scsi_queue_rq(struct blk_mq_hw_ctx *hctx,
 		goto out_dec_host_busy;
 	}
 
+
 	return BLK_STS_OK;
 
 out_dec_host_busy:

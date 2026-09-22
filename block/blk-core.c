@@ -67,6 +67,9 @@ static DEFINE_IDA(blk_queue_ida);
  */
 static struct kmem_cache *blk_requestq_cachep;
 
+/* UFS */
+struct kmem_cache *epoch_cachep;
+
 /*
  * Controlling structure to kblockd
  */
@@ -256,6 +259,7 @@ static void blk_free_queue_rcu(struct rcu_head *rcu_head)
 
 static void blk_free_queue(struct request_queue *q)
 {
+	mempool_destroy(q->epoch_pool);
 	blk_free_queue_stats(q->stats);
 	if (queue_is_mq(q))
 		blk_mq_release(q);
@@ -421,6 +425,17 @@ struct request_queue *blk_alloc_queue(struct queue_limits *lim, int node_id)
 
 	q->node = node_id;
 
+	/* UFS */
+	if(!q->epoch_pool)
+		q->epoch_pool = mempool_create_node(BLKDEV_MIN_RQ, mempool_alloc_slab,
+			mempool_free_slab, epoch_cachep, GFP_NOFS, q->node);
+
+	if(!q->epoch_pool) {
+		printk(KERN_ERR "epoch_pool create error\n");
+		error = -ENOMEM;
+		goto fail_stats;
+	}
+
 	atomic_set(&q->nr_active_requests_shared_tags, 0);
 
 	timer_setup(&q->timeout, blk_rq_timed_out_timer, 0);
@@ -468,6 +483,7 @@ struct request_queue *blk_alloc_queue(struct queue_limits *lim, int node_id)
 	return q;
 
 fail_stats:
+	mempool_destroy(q->epoch_pool);
 	blk_free_queue_stats(q->stats);
 fail_id:
 	ida_free(&blk_queue_ida, q->id);
@@ -1260,6 +1276,40 @@ void blk_finish_plug(struct blk_plug *plug)
 }
 EXPORT_SYMBOL(blk_finish_plug);
 
+/* UFS */
+void blk_issue_barrier_plug()
+{
+	if (current->__epoch)
+		blk_finish_epoch();
+	else
+		current->barrier_fail = 1;
+}
+EXPORT_SYMBOL(blk_issue_barrier_plug);
+
+/* UFS */
+void blk_request_dispatched(struct request *req)
+{
+	struct bio *bio;
+
+	if (!(req->cmd_bflags & REQ_ORDERED))
+		return;
+	for (bio = req->bio; bio; bio = bio->bi_next) {
+		struct epoch *epoch = xchg(&bio->bi_epoch, NULL);
+
+		if (epoch) {
+			if (atomic_dec_return(&epoch->pending) == 0 &&
+			    READ_ONCE(epoch->barrier))
+				req->cmd_bflags |= REQ_BARRIER;
+			atomic_inc(&epoch->dispatch);
+			put_epoch(epoch);
+		}
+		/* Large folios may span requests; use writeback completion there. */
+		dispatch_bio_bh(bio);
+	}
+}
+
+EXPORT_SYMBOL(blk_request_dispatched);
+
 void blk_io_schedule(void)
 {
 	/* Prevent hang_check timer from firing at us during very long I/O */
@@ -1287,6 +1337,9 @@ int __init blk_dev_init(void)
 		panic("Failed to create kblockd\n");
 
 	blk_requestq_cachep = KMEM_CACHE(request_queue, SLAB_PANIC);
+	/* UFS */
+	epoch_cachep = kmem_cache_create("blkdev_epoch",
+					sizeof(struct epoch), 0, SLAB_PANIC, NULL);
 
 	blk_debugfs_root = debugfs_create_dir("block", NULL);
 

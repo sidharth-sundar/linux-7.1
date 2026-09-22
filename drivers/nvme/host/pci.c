@@ -31,6 +31,8 @@
 #include "trace.h"
 #include "nvme.h"
 
+#include <trace/events/block.h>
+
 #define SQ_SIZE(q)	((q)->q_depth << (q)->sqes)
 #define CQ_SIZE(q)	((q)->q_depth * sizeof(struct nvme_completion))
 
@@ -287,6 +289,8 @@ struct nvme_descriptor_pools {
 	struct dma_pool *large;
 	struct dma_pool *small;
 };
+
+extern void blk_request_dispatched(struct request *req);
 
 /*
  * Represents an NVM Express device.  Each nvme_dev is a PCI function.
@@ -1452,6 +1456,9 @@ static blk_status_t nvme_queue_rq(struct blk_mq_hw_ctx *hctx,
 		return ret;
 	spin_lock(&nvmeq->sq_lock);
 	nvme_sq_copy_cmd(nvmeq, &iod->cmd);
+	/* Notify after SQ copy, before publishing its tail to hardware. */
+	blk_mq_dispatch_request(req);
+	blk_request_dispatched(req);
 	nvme_write_sq_db(nvmeq, bd->last);
 	spin_unlock(&nvmeq->sq_lock);
 	return BLK_STS_OK;
@@ -1469,6 +1476,9 @@ static void nvme_submit_cmds(struct nvme_queue *nvmeq, struct rq_list *rqlist)
 		struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
 
 		nvme_sq_copy_cmd(nvmeq, &iod->cmd);
+
+		blk_mq_dispatch_request(req);
+		blk_request_dispatched(req);
 	}
 	nvme_write_sq_db(nvmeq, true);
 	spin_unlock(&nvmeq->sq_lock);

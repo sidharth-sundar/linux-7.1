@@ -1,0 +1,41 @@
+What:           /sys/fs/ext4/<device>/cjfs/pending_version_depth
+Date:           September 2026
+KernelVersion:  7.1 CJFS research fork
+Description:
+                Root-only staged shadow-version slot depth, integer 1..5.
+                Default 1. Changes take effect only upon successful apply.
+
+What:           /sys/fs/ext4/<device>/cjfs/pending_copy_mode
+Date:           September 2026
+KernelVersion:  7.1 CJFS research fork
+Description:
+                Root-only staged copy policy: lazy (default) or eager.
+                Required escaping/undo copies are unaffected.
+
+What:           /sys/fs/ext4/<device>/cjfs/pending_coalesce_us
+Date:           September 2026
+KernelVersion:  7.1 CJFS research fork
+Description:
+                Root-only staged conflict coalescing budget, 0..10000 us.
+                Default 0 disables optional coalescing. The budget is not
+                renewed on retry and does not bound mandatory conflict waits.
+
+What:           /sys/fs/ext4/<device>/cjfs/apply
+Date:           September 2026
+KernelVersion:  7.1 CJFS research fork
+Description:
+                Root-only write of 1 drains the journal while blocking new
+                ordinary handles, then atomically publishes the pending tuple
+                and increments generation. It always releases its admission
+                barrier before returning. Failed drains preserve active values.
+                Requires writable, unfrozen ordered-data ext4 with an internal
+                journal and Fast Commit inactive. Competing userspace controllers
+                must serialize the entire stage/apply/readback sequence.
+
+What:           /sys/fs/ext4/<device>/cjfs/effective
+Date:           September 2026
+KernelVersion:  7.1 CJFS research fork
+Description:
+                Root-only read returns a coherent line:
+                depth copy_mode coalesce_us generation
+                Generation starts at 1 for each newly created journal instance.

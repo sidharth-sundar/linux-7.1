@@ -570,8 +570,31 @@ struct transaction_chp_stats_s {
  *
  */
 
+struct transaction_run_stats_s {
+	unsigned long		rs_wait;
+	unsigned long		rs_request_delay;
+	unsigned long		rs_running;
+	unsigned long		rs_locked;
+	unsigned long		rs_flushing;
+	unsigned long		rs_logging;
+
+	__u32			rs_handle_count;
+	__u32			rs_blocks;
+	__u32			rs_blocks_logged;
+};
+
+struct transaction_stats_s {
+	unsigned long		ts_tid;
+	unsigned long		ts_requested;
+	struct transaction_run_stats_s run;
+};
+
 struct transaction_s
 {
+	unsigned int t_cjfs_depth;
+	bool t_cjfs_eager;
+	unsigned int t_cjfs_window_us;
+	u64 t_cjfs_generation;
 	/* Pointer to the journal for this transaction. [no locking] */
 	journal_t		*t_journal;
 
@@ -645,12 +668,37 @@ struct transaction_s
 	struct journal_head	*t_shadow_list;
 
 	/*
+	 * Buffer head of the journal commit block.
+	 * - 2022. 8. 25. Joontaek Oh.
+	 */
+	struct buffer_head	*t_cbh;
+
+	/*
 	 * List of inodes associated with the transaction; e.g., ext4 uses
 	 * this to track inodes in data=ordered and data=journal mode that
 	 * need special handling on transaction commit; also used by ocfs2.
 	 * [j_list_lock]
 	 */
 	struct list_head	t_inode_list;
+
+	/*
+	 * List of log blocks which are dispatched by the commit thread.
+	 * - 2022. 8. 25. Joontaek Oh.
+	 */
+	struct list_head	t_io_bufs;
+
+	/*
+	 * List of journal blocks such as a journal descriptor block,
+	 * a journal commit block, and a revoke block which are
+	 * dispatched by the commit thread.
+	 * - 2022. 8. 25. Joontaek Oh.
+	 */
+	struct list_head	t_log_bufs;
+
+	/*
+	 * Protects info related to handles
+	 */
+	spinlock_t		t_handle_lock;
 
 	/*
 	 * Longest time some handle had to wait for running transaction
@@ -704,6 +752,22 @@ struct transaction_s
 	transaction_t		*t_cpnext, *t_cpprev;
 
 	/*
+	 * Forward and backward links for the circular list of all transactions
+	 * awaiting flush. [j_flush_list_lock]
+	 * - 2022. 8. 27. Joontaek Oh.
+	 */
+	transaction_t		*t_flushnext, *t_flushprev;
+
+	/*
+	 * Count of the conflict between this transaction and other transactions.
+	 * - 2022. 8. 27. Joontaek Oh.
+	 */
+	atomic_t		t_conflict_count;
+
+	/* CJFS - Profiling */
+	atomic_t		t_pconflict_count;
+
+	/*
 	 * When will the transaction expire (become due for commit), in jiffies?
 	 * [no locking]
 	 */
@@ -714,6 +778,12 @@ struct transaction_s
 	 */
 	ktime_t			t_start_time;
 
+	/* CJFS - Profiling */
+	ktime_t			t_commit_start_time;
+
+	/* CJFS - Profiling */
+	u64 			commit_time;
+
 	/*
 	 * This transaction is being forced and some process is
 	 * waiting for it to finish.
@@ -722,25 +792,26 @@ struct transaction_s
 
 	/* Disk flush needs to be sent to fs partition [no locking] */
 	int			t_need_data_flush;
-};
 
-struct transaction_run_stats_s {
-	unsigned long		rs_wait;
-	unsigned long		rs_request_delay;
-	unsigned long		rs_running;
-	unsigned long		rs_locked;
-	unsigned long		rs_flushing;
-	unsigned long		rs_logging;
+	/*
+	 * These fields were the local variable jbd2_journal_commit_transaction
+	 * Once the jbd2_journal_commit_transaction is devided into two,
+	 * it is moved to here.
+	 * - 2022. 8. 25. Joontaek Oh.
+	 */
+	int			t_update_tail;
+	unsigned long 		t_first_block;
+	tid_t 			t_first_tid;
+	__u32			t_crc32_sum;
 
-	__u32			rs_handle_count;
-	__u32			rs_blocks;
-	__u32			rs_blocks_logged;
-};
-
-struct transaction_stats_s {
-	unsigned long		ts_tid;
-	unsigned long		ts_requested;
-	struct transaction_run_stats_s run;
+	/*
+	 * For use by the filesystem to store fs-specific data
+	 * structures associated with the transaction
+	 */
+	struct list_head	t_private_list;
+	/* CJFS */
+	struct transaction_stats_s stats;
+	int 			seq;
 };
 
 static inline unsigned long
@@ -765,6 +836,13 @@ enum passtype {PASS_SCAN, PASS_REVOKE, PASS_REPLAY};
  */
 struct journal_s
 {
+	/* Configuration mutex is never acquired by commit/flush paths. */
+	struct mutex j_cjfs_config_mutex;
+	unsigned int j_cjfs_depth, j_cjfs_window_us;
+	bool j_cjfs_eager, j_cjfs_reconfiguring;
+	unsigned int j_cjfs_pending_depth, j_cjfs_pending_window_us;
+	bool j_cjfs_pending_eager;
+	u64 j_cjfs_generation;
 	/**
 	 * @j_flags: General journaling state flags [j_state_lock,
 	 * no lock for quick racy checks]
@@ -830,6 +908,14 @@ struct journal_s
 	transaction_t		*j_committing_transaction;
 
 	/**
+	 * @j_flushing_transaction:
+	 *
+	 * the transaction we are flushing to disk
+	 * [j_state_lock] [caller holding open handle]
+	 */
+	transaction_t		*j_flushing_transactions;
+
+	/**
 	 * @j_checkpoint_transactions:
 	 *
 	 * ... and a linked circular list of all transactions waiting for
@@ -851,9 +937,19 @@ struct journal_s
 	wait_queue_head_t	j_wait_done_commit;
 
 	/**
+	 * @j_wait_done_flush: Wait queue for waiting for flush to complete.
+	 */
+	wait_queue_head_t	j_wait_done_flush;
+
+	/**
 	 * @j_wait_commit: Wait queue to trigger commit.
 	 */
 	wait_queue_head_t	j_wait_commit;
+
+	/**
+	 * @j_wait_flush: Wait queue to trigger flush.
+	 */
+	wait_queue_head_t	j_wait_flush;
 
 	/**
 	 * @j_wait_updates: Wait queue to wait for updates to complete.
@@ -1034,6 +1130,12 @@ struct journal_s
 	spinlock_t		j_list_lock;
 
 	/**
+	 * @j_flush_list_lock: Protects the flush lists.
+	 * - 2022. 8. 27. Joontaek Oh.
+	 */
+	spinlock_t		j_flush_list_lock;
+
+	/**
 	 * @j_inode:
 	 *
 	 * Optional inode where we store the journal.  If present, all
@@ -1062,6 +1164,8 @@ struct journal_s
 	 * [j_state_lock, no lock for quick racy checks]
 	 */
 	tid_t			j_commit_sequence;
+	tid_t			j_flush_sequence;
+	tid_t			j_transfer_sequence;
 
 	/**
 	 * @j_commit_request:
@@ -1085,6 +1189,11 @@ struct journal_s
 	 * @j_task: Pointer to the current commit thread for this journal.
 	 */
 	struct task_struct	*j_task;
+
+	/**
+	 * @j_task_flush: Pointer to the current flush thread for this journal.
+	 */
+	struct task_struct	*j_task_flush;
 
 	/**
 	 * @j_max_transaction_buffers:
@@ -1430,6 +1539,14 @@ extern bool __jbd2_journal_refile_buffer(struct journal_head *);
 extern void jbd2_journal_refile_buffer(journal_t *, struct journal_head *);
 extern void __jbd2_journal_file_buffer(struct journal_head *, transaction_t *, int);
 extern void jbd2_journal_file_buffer(struct journal_head *, transaction_t *, int);
+
+/* CJFS */
+extern void jbd2_journal_unfile_buffer_entry(journal_t *, struct journal_head *, int);
+extern bool __jbd2_journal_refile_buffer_entry(struct journal_head *, transaction_t *);
+extern void jbd2_journal_refile_buffer_entry(journal_t *, struct journal_head *,
+		transaction_t *);
+
+
 static inline void jbd2_file_log_bh(struct list_head *head, struct buffer_head *bh)
 {
 	list_add_tail(&bh->b_assoc_buffers, head);
@@ -1450,6 +1567,8 @@ void jbd2_update_log_tail(journal_t *journal, tid_t tid, unsigned long block);
 
 /* Commit management */
 extern void jbd2_journal_commit_transaction(journal_t *);
+extern void jbd2_journal_barrier_commit_transaction(journal_t *);
+extern void jbd2_journal_barrier_flush_transaction(journal_t *);
 
 /* Checkpoint list management */
 enum jbd2_shrink_type {JBD2_SHRINK_DESTROY, JBD2_SHRINK_BUSY_STOP, JBD2_SHRINK_BUSY_SKIP};
@@ -1782,6 +1901,29 @@ static inline unsigned long jbd2_log_space_left(journal_t *journal)
                         j_committing_transaction->t_outstanding_credits);
 	}
 	return max_t(long, free, 0);
+}
+
+int jbd2_cjfs_reconfigure(journal_t *journal);
+
+static inline unsigned int jbd2_cjfs_slot(const transaction_t *t)
+{
+	return t->t_tid % t->t_cjfs_depth;
+}
+
+/* Caller holds b_state_lock or the journal list lock. */
+static inline transaction_t *jbd2_jh_latest_transaction(struct journal_head *jh)
+{
+	transaction_t *latest = NULL;
+	int v;
+
+	for (v = 0; v < CJFS_MAX_VERSIONS; v++) {
+		transaction_t *t = jh->b_jh_entry[v]->b_next_transaction;
+		if (!t)
+			t = jh->b_jh_entry[v]->b_transaction;
+		if (t && (!latest || tid_gt(t->t_tid, latest->t_tid)))
+			latest = t;
+	}
+	return latest;
 }
 
 /*
