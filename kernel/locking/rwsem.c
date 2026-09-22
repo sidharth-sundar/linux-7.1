@@ -32,6 +32,7 @@
 
 #ifndef CONFIG_PREEMPT_RT
 #include "lock_events.h"
+#include "rwsem_diag.h"
 
 /*
  * The least significant 2 bits of the owner value has the following
@@ -675,6 +676,7 @@ static inline bool rwsem_try_write_lock(struct rw_semaphore *sem,
 	if (new & RWSEM_FLAG_HANDOFF) {
 		first->handoff_set = true;
 		lockevent_inc(rwsem_wlock_handoff);
+		rwsem_diag_handoff(sem, waiter->timeout);
 		return false;
 	}
 
@@ -1153,7 +1155,7 @@ rwsem_down_write_slowpath(struct rw_semaphore *sem, int state)
 	 */
 	waiter.task = current;
 	waiter.type = RWSEM_WAITING_FOR_WRITE;
-	waiter.timeout = jiffies + RWSEM_WAIT_TIMEOUT;
+	waiter.timeout = rwsem_diag_deadline(sem, RWSEM_WAIT_TIMEOUT);
 	waiter.handoff_set = false;
 
 	raw_spin_lock_irq(&sem->wait_lock);

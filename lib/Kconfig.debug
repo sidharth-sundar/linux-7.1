@@ -3627,4 +3627,16 @@ config RUST_INLINE_HELPERS
 
 endmenu # "Rust"
 
+config RWSEM_HANDOFF_DIAG
+	bool "Single-directory rwsem writer handoff diagnostic"
+	depends on DEBUG_FS && TRACING && !PREEMPT_RT
+	default n
+	help
+	  Root-only debugfs registration of one directory file descriptor for
+	  a writer handoff threshold of 1, 4 or 8 ticks. Other rwsems and
+	  readers retain the normal policy. Intended only for controlled
+	  experiments with workers stopped during reconfiguration.
+	  Adds counters and a tracepoint; not a production tuning interface.
+	  If unsure, say N.
+
 endmenu # Kernel hacking
