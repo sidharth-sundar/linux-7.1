@@ -83,6 +83,7 @@
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/jbd2.h>
+#include "interval_diag.h"
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/list.h>
@@ -323,8 +324,13 @@ void jbd2_journal_destroy_revoke(journal_t *journal)
  * by one.
  */
 
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_journal_revoke(handle_t *handle, unsigned long long blocknr,
+		   struct buffer_head *bh_in)
+#else
 int jbd2_journal_revoke(handle_t *handle, unsigned long long blocknr,
 		   struct buffer_head *bh_in)
+#endif
 {
 	struct buffer_head *bh = NULL;
 	journal_t *journal;
@@ -406,6 +412,22 @@ int jbd2_journal_revoke(handle_t *handle, unsigned long long blocknr,
 	BUFFER_TRACE(bh_in, "exit");
 	return err;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_journal_revoke(handle_t *handle, unsigned long long blocknr,
+		   struct buffer_head *bh_in)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_journal_revoke(handle, blocknr, bh_in);
+	ctx = ji_handle(handle);
+	ji_emit(ctx, JI_REVOKE, true, 0);
+	ret = ji_impl_jbd2_journal_revoke(handle, blocknr, bh_in);
+	ji_emit(ctx, JI_REVOKE, false, ret);
+	return ret;
+}
+#endif
 
 /*
  * Cancel an outstanding revoke.  For use only internally by the

@@ -17,6 +17,7 @@
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/jbd2.h>
+#include "interval_diag.h"
 #include <trace/events/cjfs.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
@@ -164,7 +165,7 @@ static void wait_transaction_locked(journal_t *journal)
 	if (need_to_start)
 		jbd2_log_start_commit(journal, tid);
 	jbd2_might_wait_for_commit(journal);
-	schedule();
+	ji_wait(journal, 0, JI_ADMISSION, 0, schedule());
 	finish_wait(&journal->j_wait_transaction_locked, &wait);
 }
 
@@ -192,7 +193,7 @@ static void wait_transaction_switching(journal_t *journal)
 	 * and handling of reserved handles actually relies on that for
 	 * correctness.
 	 */
-	schedule();
+	ji_wait(journal, 0, JI_SWITCH, 0, schedule());
 	finish_wait(&journal->j_wait_transaction_locked, &wait);
 }
 
@@ -261,9 +262,10 @@ __must_hold(&journal->j_state_lock)
 		    jbd2_max_user_trans_buffers(journal)) {
 			read_unlock(&journal->j_state_lock);
 			jbd2_might_wait_for_commit(journal);
+			ji_wait(journal, 0, JI_RESERVED_WAIT, 0,
 			wait_event(journal->j_wait_reserved,
 				   atomic_read(&journal->j_reserved_credits) + total <=
-				   jbd2_max_user_trans_buffers(journal));
+				   jbd2_max_user_trans_buffers(journal)));
 			__acquire(&journal->j_state_lock); /* fake out sparse */
 			return 1;
 		}
@@ -291,7 +293,8 @@ __must_hold(&journal->j_state_lock)
 		write_lock(&journal->j_state_lock);
 		if (jbd2_log_space_left(journal) <
 					journal->j_max_transaction_buffers)
-			__jbd2_log_wait_for_space(journal);
+			ji_wait(journal, 0, JI_LOG_SPACE, 0,
+				__jbd2_log_wait_for_space(journal));
 		write_unlock(&journal->j_state_lock);
 		__acquire(&journal->j_state_lock); /* fake out sparse */
 		return 1;
@@ -308,9 +311,10 @@ __must_hold(&journal->j_state_lock)
 		atomic_sub(total, &t->t_outstanding_credits);
 		read_unlock(&journal->j_state_lock);
 		jbd2_might_wait_for_commit(journal);
-		wait_event(journal->j_wait_reserved,
+		ji_wait(journal, 0, JI_RESERVED_WAIT, 0,
+			wait_event(journal->j_wait_reserved,
 			 atomic_read(&journal->j_reserved_credits) + rsv_blocks
-			 <= jbd2_max_user_trans_buffers(journal) / 2);
+			 <= jbd2_max_user_trans_buffers(journal) / 2));
 		__acquire(&journal->j_state_lock); /* fake out sparse */
 		return 1;
 	}
@@ -392,8 +396,9 @@ repeat:
 	 */
 	if (!handle->h_reserved && journal->j_barrier_count) {
 		read_unlock(&journal->j_state_lock);
-		wait_event(journal->j_wait_transaction_locked,
-				journal->j_barrier_count == 0);
+		ji_wait(journal, 0, JI_BARRIER, 0,
+			wait_event(journal->j_wait_transaction_locked,
+				journal->j_barrier_count == 0));
 		goto repeat;
 	}
 
@@ -480,9 +485,15 @@ static handle_t *new_handle(int nblocks)
 	return handle;
 }
 
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static handle_t *ji_impl_jbd2__journal_start(journal_t *journal, int nblocks, int rsv_blocks,
+			      int revoke_records, gfp_t gfp_mask,
+			      unsigned int type, unsigned int line_no)
+#else
 handle_t *jbd2__journal_start(journal_t *journal, int nblocks, int rsv_blocks,
 			      int revoke_records, gfp_t gfp_mask,
 			      unsigned int type, unsigned int line_no)
+#endif
 {
 	handle_t *handle = journal_current_handle();
 	int err;
@@ -531,6 +542,25 @@ handle_t *jbd2__journal_start(journal_t *journal, int nblocks, int rsv_blocks,
 
 	return handle;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+handle_t *jbd2__journal_start(journal_t *journal, int nblocks, int rsv_blocks,
+			      int revoke_records, gfp_t gfp_mask,
+			      unsigned int type, unsigned int line_no)
+{
+	struct jbd2_interval_ctx ctx;
+	handle_t *ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2__journal_start(journal, nblocks, rsv_blocks, revoke_records, gfp_mask, type, line_no);
+	ctx = ji_journal(journal, 0, 0);
+	ji_emit(ctx, JI_START, true, 0);
+	ret = ji_impl_jbd2__journal_start(journal, nblocks, rsv_blocks, revoke_records, gfp_mask, type, line_no);
+	if (!IS_ERR(ret))
+		ctx = ji_handle(ret);
+	ji_emit(ctx, JI_START, false, IS_ERR(ret) ? PTR_ERR(ret) : 0);
+	return ret;
+}
+#endif
 EXPORT_SYMBOL(jbd2__journal_start);
 
 
@@ -595,8 +625,13 @@ EXPORT_SYMBOL(jbd2_journal_free_reserved);
  *
  * Return 0 on success, non-zero on error - handle is freed in that case.
  */
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_journal_start_reserved(handle_t *handle, unsigned int type,
+				unsigned int line_no)
+#else
 int jbd2_journal_start_reserved(handle_t *handle, unsigned int type,
 				unsigned int line_no)
+#endif
 {
 	journal_t *journal = handle->h_journal;
 	int ret = -EIO;
@@ -633,6 +668,24 @@ int jbd2_journal_start_reserved(handle_t *handle, unsigned int type,
 				line_no, handle->h_total_credits);
 	return 0;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_journal_start_reserved(handle_t *handle, unsigned int type,
+				unsigned int line_no)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_journal_start_reserved(handle, type, line_no);
+	ctx = ji_handle(handle);
+	ji_emit(ctx, JI_RESERVED, true, 0);
+	ret = ji_impl_jbd2_journal_start_reserved(handle, type, line_no);
+	if (!ret)
+		ctx = ji_handle(handle);
+	ji_emit(ctx, JI_RESERVED, false, ret);
+	return ret;
+}
+#endif
 EXPORT_SYMBOL(jbd2_journal_start_reserved);
 
 /**
@@ -656,7 +709,11 @@ EXPORT_SYMBOL(jbd2_journal_start_reserved);
  * return code < 0 implies an error
  * return code > 0 implies normal transaction-full status.
  */
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_journal_extend(handle_t *handle, int nblocks, int revoke_records)
+#else
 int jbd2_journal_extend(handle_t *handle, int nblocks, int revoke_records)
+#endif
 {
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal;
@@ -711,6 +768,21 @@ error_out:
 	read_unlock(&journal->j_state_lock);
 	return result;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_journal_extend(handle_t *handle, int nblocks, int revoke_records)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_journal_extend(handle, nblocks, revoke_records);
+	ctx = ji_handle(handle);
+	ji_emit(ctx, JI_EXTEND, true, 0);
+	ret = ji_impl_jbd2_journal_extend(handle, nblocks, revoke_records);
+	ji_emit(ctx, JI_EXTEND, false, ret);
+	return ret;
+}
+#endif
 
 static void stop_this_handle(handle_t *handle)
 {
@@ -774,8 +846,13 @@ static void stop_this_handle(handle_t *handle)
  * credits. We preserve reserved handle if there's any attached to the
  * passed in handle.
  */
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2__journal_restart(handle_t *handle, int nblocks, int revoke_records,
+			  gfp_t gfp_mask)
+#else
 int jbd2__journal_restart(handle_t *handle, int nblocks, int revoke_records,
 			  gfp_t gfp_mask)
+#endif
 {
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal;
@@ -818,6 +895,24 @@ int jbd2__journal_restart(handle_t *handle, int nblocks, int revoke_records,
 				 handle->h_total_credits);
 	return ret;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2__journal_restart(handle_t *handle, int nblocks, int revoke_records,
+			  gfp_t gfp_mask)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2__journal_restart(handle, nblocks, revoke_records, gfp_mask);
+	ctx = ji_handle(handle);
+	ji_emit(ctx, JI_RESTART, true, 0);
+	ret = ji_impl_jbd2__journal_restart(handle, nblocks, revoke_records, gfp_mask);
+	if (!ret)
+		ctx = ji_handle(handle);
+	ji_emit(ctx, JI_RESTART, false, ret);
+	return ret;
+}
+#endif
 EXPORT_SYMBOL(jbd2__journal_restart);
 
 
@@ -884,8 +979,9 @@ void jbd2_journal_lock_updates(journal_t *journal)
 	/* Wait until there are no reserved handles */
 	if (atomic_read(&journal->j_reserved_credits)) {
 		write_unlock(&journal->j_state_lock);
-		wait_event(journal->j_wait_reserved,
-			   atomic_read(&journal->j_reserved_credits) == 0);
+		ji_wait(journal, 0, JI_RESERVED_WAIT, 0,
+			wait_event(journal->j_wait_reserved,
+			   atomic_read(&journal->j_reserved_credits) == 0));
 		write_lock(&journal->j_state_lock);
 	}
 
@@ -976,7 +1072,8 @@ do_get_write_access(handle_t *handle, struct journal_head *jh,
 	int v, error = 0;
 
 retry:
-	lock_buffer(bh);
+	ji_wait(journal, transaction->t_tid, JI_BUFFER_LOCK, bh,
+		lock_buffer(bh));
 	spin_lock(&jh->b_state_lock);
 	entry = jh->b_jh_entry[version];
 	if (is_handle_aborted(handle)) {
@@ -994,9 +1091,10 @@ retry:
 		unlock_buffer(bh);
 		wake_up(&journal->j_wait_commit);
 		wake_up(&journal->j_wait_flush);
-		wait_event(journal->j_wait_done_flush,
+		ji_wait(journal, transaction->t_tid, JI_SLOT_WAIT, bh,
+				wait_event(journal->j_wait_done_flush,
 			!READ_ONCE(entry->b_next_transaction) ||
-			is_journal_aborted(journal));
+			is_journal_aborted(journal)));
 		trace_cjfs_event(journal->j_fs_dev->bd_dev, transaction->t_tid,
 			transaction->t_cjfs_generation, "slot_wait_ns", ktime_get_ns() - begin);
 		goto retry;
@@ -1017,8 +1115,9 @@ retry:
 				u64 begin = ktime_get_ns();
 				spin_unlock(&jh->b_state_lock);
 				unlock_buffer(bh);
+				ji_wait(journal, transaction->t_tid, JI_DIRECT_IO, bh,
 				wait_on_bit_io(&old->b_io_state, 0,
-					       TASK_UNINTERRUPTIBLE);
+					       TASK_UNINTERRUPTIBLE));
 				trace_cjfs_event(journal->j_fs_dev->bd_dev,
 					transaction->t_tid, transaction->t_cjfs_generation,
 					"direct_io_wait_ns", ktime_get_ns() - begin);
@@ -1032,12 +1131,14 @@ retry:
 		if (!frozen) {
 			spin_unlock(&jh->b_state_lock);
 			unlock_buffer(bh);
-			frozen = jbd2_alloc(bh->b_size, GFP_NOFS | __GFP_NOFAIL);
+			ji_wait(journal, transaction->t_tid, JI_COPY_ALLOC, bh,
+				frozen = jbd2_alloc(bh->b_size, GFP_NOFS | __GFP_NOFAIL));
 			goto retry;
 		}
 		old->b_frozen_data = frozen;
 		frozen = NULL;
-		jbd2_freeze_jh_data(jh, v);
+		ji_wait(journal, transaction->t_tid, JI_LAZY_COPY, bh,
+				jbd2_freeze_jh_data(jh, v));
 		trace_cjfs_event(journal->j_fs_dev->bd_dev, transaction->t_tid,
 			transaction->t_cjfs_generation, "lazy_copy", bh->b_size);
 	}
@@ -1144,7 +1245,11 @@ out:
  * because we're ``write()ing`` a buffer which is also part of a shared mapping.
  */
 
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_journal_get_write_access(handle_t *handle, struct buffer_head *bh)
+#else
 int jbd2_journal_get_write_access(handle_t *handle, struct buffer_head *bh)
+#endif
 {
 	struct journal_head *jh;
 	journal_t *journal;
@@ -1178,6 +1283,21 @@ int jbd2_journal_get_write_access(handle_t *handle, struct buffer_head *bh)
 	jbd2_journal_put_journal_head(jh);
 	return rc;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_journal_get_write_access(handle_t *handle, struct buffer_head *bh)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_journal_get_write_access(handle, bh);
+	ctx = ji_handle(handle);
+	ji_emit(ctx, JI_WRITE_ACCESS, true, 0);
+	ret = ji_impl_jbd2_journal_get_write_access(handle, bh);
+	ji_emit(ctx, JI_WRITE_ACCESS, false, ret);
+	return ret;
+}
+#endif
 
 
 /*
@@ -1199,7 +1319,11 @@ int jbd2_journal_get_write_access(handle_t *handle, struct buffer_head *bh)
  *
  * Call this if you create a new bh.
  */
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_journal_get_create_access(handle_t *handle, struct buffer_head *bh)
+#else
 int jbd2_journal_get_create_access(handle_t *handle, struct buffer_head *bh)
+#endif
 {
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal;
@@ -1289,6 +1413,21 @@ out:
 	jbd2_journal_put_journal_head(jh);
 	return err;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_journal_get_create_access(handle_t *handle, struct buffer_head *bh)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_journal_get_create_access(handle, bh);
+	ctx = ji_handle(handle);
+	ji_emit(ctx, JI_CREATE_ACCESS, true, 0);
+	ret = ji_impl_jbd2_journal_get_create_access(handle, bh);
+	ji_emit(ctx, JI_CREATE_ACCESS, false, ret);
+	return ret;
+}
+#endif
 
 /**
  * jbd2_journal_get_undo_access() -  Notify intent to modify metadata with
@@ -1316,7 +1455,11 @@ out:
  *
  * Returns error number or 0 on success.
  */
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_journal_get_undo_access(handle_t *handle, struct buffer_head *bh)
+#else
 int jbd2_journal_get_undo_access(handle_t *handle, struct buffer_head *bh)
+#endif
 {
 	int err;
 	struct journal_head *jh;
@@ -1368,6 +1511,21 @@ out:
 		jbd2_free(committed_data, bh->b_size);
 	return err;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_journal_get_undo_access(handle_t *handle, struct buffer_head *bh)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_journal_get_undo_access(handle, bh);
+	ctx = ji_handle(handle);
+	ji_emit(ctx, JI_UNDO_ACCESS, true, 0);
+	ret = ji_impl_jbd2_journal_get_undo_access(handle, bh);
+	ji_emit(ctx, JI_UNDO_ACCESS, false, ret);
+	return ret;
+}
+#endif
 
 /**
  * jbd2_journal_set_triggers() - Add triggers for commit writeout
@@ -1434,7 +1592,11 @@ void jbd2_buffer_abort_trigger(struct journal_head *jh,
  * buffer: that only gets done when the old transaction finally
  * completes its commit.
  */
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
+#else
 int jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
+#endif
 {
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal = transaction->t_journal;
@@ -1608,6 +1770,21 @@ out:
 	JBUFFER_TRACE(jh, "exit");
 	return ret;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_journal_dirty_metadata(handle, bh);
+	ctx = ji_handle(handle);
+	ji_emit(ctx, JI_DIRTY, true, 0);
+	ret = ji_impl_jbd2_journal_dirty_metadata(handle, bh);
+	ji_emit(ctx, JI_DIRTY, false, ret);
+	return ret;
+}
+#endif
 
 /**
  * jbd2_journal_forget() - bforget() for potentially-journaled buffers.
@@ -1626,7 +1803,11 @@ out:
  * Allow this call even if the handle has aborted --- it may be part of
  * the caller's cleanup after an abort.
  */
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_journal_forget(handle_t *handle, struct buffer_head *bh)
+#else
 int jbd2_journal_forget(handle_t *handle, struct buffer_head *bh)
+#endif
 {
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal;
@@ -1800,7 +1981,8 @@ drop:
 	if (abort_journal)
 		jbd2_journal_abort(journal, err);
 	if (wait_for_writeback)
-		wait_on_buffer(bh);
+		ji_wait(journal, transaction->t_tid, JI_FORGET_IO, bh,
+			wait_on_buffer(bh));
 	jbd2_journal_put_journal_head(jh);
 	if (drop_reserve) {
 		/* no need to reserve log space for this block -bzzz */
@@ -1808,6 +1990,21 @@ drop:
 	}
 	return err;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_journal_forget(handle_t *handle, struct buffer_head *bh)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_journal_forget(handle, bh);
+	ctx = ji_handle(handle);
+	ji_emit(ctx, JI_FORGET, true, 0);
+	ret = ji_impl_jbd2_journal_forget(handle, bh);
+	ji_emit(ctx, JI_FORGET, false, ret);
+	return ret;
+}
+#endif
 
 /**
  * jbd2_journal_stop() - complete a transaction
@@ -1825,7 +2022,11 @@ drop:
  * return -EIO if a jbd2_journal_abort has been executed since the
  * transaction began.
  */
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_journal_stop(handle_t *handle)
+#else
 int jbd2_journal_stop(handle_t *handle)
+#endif
 {
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal;
@@ -1914,7 +2115,8 @@ int jbd2_journal_stop(handle_t *handle)
 			ktime_t expires = ktime_add_ns(ktime_get(),
 						       commit_time);
 			set_current_state(TASK_UNINTERRUPTIBLE);
-			schedule_hrtimeout(&expires, HRTIMER_MODE_ABS);
+			ji_wait(journal, tid, JI_SYNC_BATCH, handle,
+				schedule_hrtimeout(&expires, HRTIMER_MODE_ABS));
 		}
 	}
 
@@ -1962,6 +2164,21 @@ free_and_exit:
 	jbd2_free_handle(handle);
 	return err;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_journal_stop(handle_t *handle)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_journal_stop(handle);
+	ctx = ji_handle(handle);
+	ji_emit(ctx, JI_STOP, true, 0);
+	ret = ji_impl_jbd2_journal_stop(handle);
+	ji_emit(ctx, JI_STOP, false, ret);
+	return ret;
+}
+#endif
 
 /*
  *

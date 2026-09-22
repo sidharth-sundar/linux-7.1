@@ -13,6 +13,7 @@
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/jbd2.h>
+#include "interval_diag.h"
 #include <trace/events/cjfs.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
@@ -1307,6 +1308,10 @@ void jbd2_journal_barrier_commit_transaction(journal_t *journal)
 	/* CJFS */
 	int ver_tid;
 	u64 coalesce_deadline = 0;
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+	struct jbd2_interval_ctx diag_ctx;
+	bool diag_enabled = trace_jbd2_interval_enabled();
+#endif
 	ktime_t start, dispatch_start;
 #ifdef DEBUG_PROC_OP
 	ktime_t c_wait_start;
@@ -1370,6 +1375,12 @@ void jbd2_journal_barrier_commit_transaction(journal_t *journal)
 
 	commit_transaction = journal->j_running_transaction;
 	ver_tid = jbd2_cjfs_slot(commit_transaction);
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+	if (diag_enabled) {
+		diag_ctx = ji_journal(journal, commit_transaction->t_tid, 0);
+		ji_emit(diag_ctx, JI_COMMIT, true, 0);
+	}
+#endif
 
 	// commit_transaction->t_commit_start_time = ktime_get();
 #ifdef DEBUG_PROC_OP
@@ -1379,7 +1390,8 @@ void jbd2_journal_barrier_commit_transaction(journal_t *journal)
 op_coalescing:
 	if (atomic_read(&commit_transaction->t_conflict_count) &&
 	    cjfs_coalesce(journal, commit_transaction, &coalesce_deadline)) {
-		cjfs_coalesce_wait(journal, commit_transaction, coalesce_deadline);
+		ji_wait(journal, commit_transaction->t_tid, JI_COALESCE, 0,
+			cjfs_coalesce_wait(journal, commit_transaction, coalesce_deadline));
 		goto op_coalescing;
 	}
 
@@ -1426,7 +1438,8 @@ op_coalescing:
 			commit_transaction->t_state = T_RUNNING;
 			write_unlock(&journal->j_state_lock);
 			wake_up_all(&journal->j_wait_transaction_locked);
-			cjfs_coalesce_wait(journal, commit_transaction, coalesce_deadline);
+			ji_wait(journal, commit_transaction->t_tid, JI_COALESCE, 0,
+			cjfs_coalesce_wait(journal, commit_transaction, coalesce_deadline));
 			goto op_coalescing;
 		}
 		write_unlock(&journal->j_state_lock);
@@ -1824,7 +1837,8 @@ start_journal_io:
 		struct buffer_head *bh = list_entry(t_io_bufs.prev,
 						    struct buffer_head,
 						    b_assoc_buffers);
-		wait_on_buffer_dispatch(bh);
+		ji_wait(journal, commit_transaction->t_tid, JI_DISPATCH, bh,
+			wait_on_buffer_dispatch(bh));
 
 		jbd2_unfile_log_bh(bh);
 		jbd2_file_log_bh(&commit_transaction->t_io_bufs, bh);
@@ -1834,7 +1848,8 @@ start_journal_io:
 		struct buffer_head *bh = list_entry(t_log_bufs.prev,
 						    struct buffer_head,
 						    b_assoc_buffers);
-		wait_on_buffer_dispatch(bh);
+		ji_wait(journal, commit_transaction->t_tid, JI_DISPATCH, bh,
+			wait_on_buffer_dispatch(bh));
 		jbd2_unfile_log_bh(bh);
 		jbd2_file_log_bh(&commit_transaction->t_log_bufs, bh);
 	}
@@ -1924,6 +1939,10 @@ start_journal_io:
 	journal->j_committing_transaction = NULL;
 	write_unlock(&journal->j_state_lock);
 	wake_up(&journal->j_wait_flush);
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+	if (diag_enabled)
+		ji_emit(diag_ctx, JI_COMMIT, false, 0);
+#endif
 }
 
 /*
@@ -2328,6 +2347,10 @@ void jbd2_journal_barrier_flush_transaction(journal_t *journal)
 	unsigned int n = 0, i;
 	tid_t durable_tid;
 	int err = 0;
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+	struct jbd2_interval_ctx diag_ctx;
+	bool diag_enabled = trace_jbd2_interval_enabled();
+#endif
 
 	spin_lock(&journal->j_list_lock);
 	t = journal->j_flushing_transactions;
@@ -2338,23 +2361,32 @@ void jbd2_journal_barrier_flush_transaction(journal_t *journal)
 	batch[n++] = t;
 	durable_tid = batch[n - 1]->t_tid;
 	spin_unlock(&journal->j_list_lock);
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+	if (diag_enabled) {
+		diag_ctx = ji_journal(journal, durable_tid, 0);
+		ji_emit(diag_ctx, JI_FLUSH, true, 0);
+	}
+#endif
 
 	for (i = 0; i < n; i++) {
 		struct buffer_head *bh;
 
 		t = batch[i];
 		list_for_each_entry(bh, &t->t_io_bufs, b_assoc_buffers) {
-			wait_on_buffer(bh);
+			ji_wait(journal, durable_tid, JI_FLUSH_IO, bh,
+				wait_on_buffer(bh));
 			if (!buffer_uptodate(bh))
 				err = -EIO;
 		}
 		list_for_each_entry(bh, &t->t_log_bufs, b_assoc_buffers) {
-			wait_on_buffer(bh);
+			ji_wait(journal, durable_tid, JI_FLUSH_IO, bh,
+				wait_on_buffer(bh));
 			if (!buffer_uptodate(bh))
 				err = -EIO;
 		}
 		if (t->t_cbh) {
-			wait_on_buffer(t->t_cbh);
+			ji_wait(journal, durable_tid, JI_FLUSH_IO, t->t_cbh,
+				wait_on_buffer(t->t_cbh));
 			if (!buffer_uptodate(t->t_cbh))
 				err = -EIO;
 		}
@@ -2362,7 +2394,8 @@ void jbd2_journal_barrier_flush_transaction(journal_t *journal)
 	if (!err && (journal->j_flags & JBD2_BARRIER)) {
 		trace_cjfs_event(journal->j_fs_dev->bd_dev, durable_tid,
 			batch[0]->t_cjfs_generation, "flush_call", 1);
-		err = blkdev_issue_flush(journal->j_dev);
+		ji_wait(journal, durable_tid, JI_DEVICE_FLUSH, 0,
+			err = blkdev_issue_flush(journal->j_dev));
 	}
 	if (err)
 		jbd2_journal_abort(journal, err);
@@ -2376,4 +2409,8 @@ void jbd2_journal_barrier_flush_transaction(journal_t *journal)
 		journal->j_cjfs_generation, err ? "retired_error" : "durable", 1);
 	write_unlock(&journal->j_state_lock);
 	wake_up_all(&journal->j_wait_done_flush);
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+	if (diag_enabled)
+		ji_emit(diag_ctx, JI_FLUSH, false, err);
+#endif
 }

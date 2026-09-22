@@ -23,6 +23,7 @@
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/jbd2.h>
+#include "interval_diag.h"
 #include <trace/events/cjfs.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
@@ -518,7 +519,8 @@ int jbd2_journal_write_metadata_buffer(transaction_t *transaction,
 			goto escape_done;
 
 		spin_unlock(&jh_in->b_state_lock);
-		tmp = jbd2_alloc(bh_in->b_size, GFP_NOFS | __GFP_NOFAIL);
+		ji_wait(journal, transaction->t_tid, JI_COPY_ALLOC, bh_in,
+			tmp = jbd2_alloc(bh_in->b_size, GFP_NOFS | __GFP_NOFAIL));
 		spin_lock(&jh_in->b_state_lock);
 		if (jh_in->b_jh_entry[ver_tid]->b_frozen_data) {
 			jbd2_free(tmp, bh_in->b_size);
@@ -526,7 +528,8 @@ int jbd2_journal_write_metadata_buffer(transaction_t *transaction,
 		}
 
 		jh_in->b_jh_entry[ver_tid]->b_frozen_data = tmp;
-		memcpy_from_folio(tmp, new_folio, new_offset, bh_in->b_size);
+		ji_wait(journal, transaction->t_tid, JI_LOG_COPY, bh_in,
+			memcpy_from_folio(tmp, new_folio, new_offset, bh_in->b_size));
 		trace_cjfs_event(journal->j_fs_dev->bd_dev, transaction->t_tid,
 			transaction->t_cjfs_generation,
 			do_escape ? "escape_copy" : "eager_copy", bh_in->b_size);
@@ -619,7 +622,11 @@ static int __jbd2_log_start_commit(journal_t *journal, tid_t target)
 	return 0;
 }
 
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_log_start_commit(journal_t *journal, tid_t tid)
+#else
 int jbd2_log_start_commit(journal_t *journal, tid_t tid)
+#endif
 {
 	int ret;
 
@@ -628,6 +635,21 @@ int jbd2_log_start_commit(journal_t *journal, tid_t tid)
 	write_unlock(&journal->j_state_lock);
 	return ret;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_log_start_commit(journal_t *journal, tid_t tid)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_log_start_commit(journal, tid);
+	ctx = ji_journal(journal, tid, 0);
+	ji_emit(ctx, JI_REQUEST, true, 0);
+	ret = ji_impl_jbd2_log_start_commit(journal, tid);
+	ji_emit(ctx, JI_REQUEST, false, ret);
+	return ret;
+}
+#endif
 
 /*
  * Force and wait any uncommitted transactions.  We can only force the running
@@ -799,7 +821,11 @@ EXPORT_SYMBOL(jbd2_trans_will_send_data_barrier);
  * Wait for a specified commit to complete.
  * The caller may not hold the journal lock.
  */
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_log_wait_commit(journal_t *journal, tid_t tid)
+#else
 int jbd2_log_wait_commit(journal_t *journal, tid_t tid)
+#endif
 {
 	int err = 0;
 
@@ -841,6 +867,21 @@ int jbd2_log_wait_commit(journal_t *journal, tid_t tid)
 		err = -EIO;
 	return err;
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_log_wait_commit(journal_t *journal, tid_t tid)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_log_wait_commit(journal, tid);
+	ctx = ji_journal(journal, tid, 0);
+	ji_emit(ctx, JI_COMMIT_WAIT, true, 0);
+	ret = ji_impl_jbd2_log_wait_commit(journal, tid);
+	ji_emit(ctx, JI_COMMIT_WAIT, false, ret);
+	return ret;
+}
+#endif
 
 /*
  * Start a fast commit. If there's an ongoing fast or full commit wait for
@@ -912,7 +953,11 @@ EXPORT_SYMBOL(jbd2_transaction_committed);
  * the transaction id is stale, it is by definition already completed,
  * so just return SUCCESS.
  */
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+static int ji_impl_jbd2_complete_transaction(journal_t *journal, tid_t tid)
+#else
 int jbd2_complete_transaction(journal_t *journal, tid_t tid)
+#endif
 {
 	int	need_to_wait = 1;
 
@@ -939,6 +984,21 @@ int jbd2_complete_transaction(journal_t *journal, tid_t tid)
 wait_commit:
 	return jbd2_log_wait_commit(journal, tid);
 }
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
+int jbd2_complete_transaction(journal_t *journal, tid_t tid)
+{
+	struct jbd2_interval_ctx ctx;
+	int ret;
+
+	if (!trace_jbd2_interval_enabled())
+		return ji_impl_jbd2_complete_transaction(journal, tid);
+	ctx = ji_journal(journal, tid, 0);
+	ji_emit(ctx, JI_COMPLETE, true, 0);
+	ret = ji_impl_jbd2_complete_transaction(journal, tid);
+	ji_emit(ctx, JI_COMPLETE, false, ret);
+	return ret;
+}
+#endif
 EXPORT_SYMBOL(jbd2_complete_transaction);
 
 /*
