@@ -80,6 +80,7 @@
 #ifndef __KERNEL__
 #include "jfs_user.h"
 #else
+#include <linux/jbd2_workvolume.h>
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/jbd2.h>
@@ -342,6 +343,7 @@ int jbd2_journal_revoke(handle_t *handle, unsigned long long blocknr,
 		BUFFER_TRACE(bh_in, "enter");
 
 	journal = handle->h_transaction->t_journal;
+	jbd2_wv_invalidate(journal, handle->h_transaction->t_tid);
 	if (!jbd2_journal_set_features(journal, 0, 0, JBD2_FEATURE_INCOMPAT_REVOKE)){
 		J_ASSERT (!"Cannot set revoke feature!");
 		return -EINVAL;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Quiescent runtime configuration for the CJFS experiment. */
 #include <linux/jbd2.h>
+#include <linux/jbd2_workvolume.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/cjfs.h>
 
@@ -10,6 +11,8 @@ int jbd2_cjfs_reconfigure(journal_t *journal)
  int err;
 
  lockdep_assert_held(&journal->j_cjfs_config_mutex);
+ if (jbd2_wv_active(journal))
+  return -EBUSY;
  if (!journal->j_cjfs_pending_depth ||
      journal->j_cjfs_pending_depth > CJFS_MAX_VERSIONS ||
      journal->j_cjfs_pending_window_us > 10000)

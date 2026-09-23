@@ -19,6 +19,7 @@
  * journaling (ext2 can use a reserved inode for storing the log).
  */
 
+#include <linux/jbd2_workvolume.h>
 #include <linux/module.h>
 #include <linux/time.h>
 #include <linux/fs.h>
@@ -548,6 +549,7 @@ copy_done:
 	}
 
 escape_done:
+	jbd2_wv_image(transaction, bh_in, new_folio, new_offset, do_escape);
 	folio_set_bh(new_bh, new_folio, new_offset);
 	new_bh->b_size = bh_in->b_size;
 	new_bh->b_bdev = journal->j_dev;
@@ -1179,6 +1181,7 @@ jbd2_journal_get_descriptor_buffer(transaction_t *transaction, int type)
 	set_buffer_uptodate(bh);
 	unlock_buffer(bh);
 	BUFFER_TRACE(bh, "return this buffer");
+	jbd2_wv_control(transaction, type);
 	return bh;
 }
 
@@ -2565,6 +2568,7 @@ int jbd2_journal_destroy(journal_t *journal)
 	}
 	if (journal->j_proc_entry)
 		jbd2_stats_proc_exit(journal);
+	jbd2_wv_destroy(journal);
 	iput(journal->j_inode);
 	if (journal->j_revoke)
 		jbd2_journal_destroy_revoke(journal);

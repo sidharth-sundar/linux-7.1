@@ -838,6 +838,7 @@ struct journal_s
 {
 	/* Configuration mutex is never acquired by commit/flush paths. */
 	struct mutex j_cjfs_config_mutex;
+	struct jbd2_workvolume *j_workvolume;
 	unsigned int j_cjfs_depth, j_cjfs_window_us;
 	bool j_cjfs_eager, j_cjfs_reconfiguring;
 	unsigned int j_cjfs_pending_depth, j_cjfs_pending_window_us;

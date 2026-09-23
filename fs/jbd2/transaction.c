@@ -14,6 +14,7 @@
  * filesystem).
  */
 
+#include <linux/jbd2_workvolume.h>
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/jbd2.h>
@@ -1331,6 +1332,8 @@ int jbd2_journal_get_create_access(handle_t *handle, struct buffer_head *bh)
 	int err;
 	/* CJFS */
 	int ver_tid = jbd2_cjfs_slot(transaction);
+	jbd2_wv_invalidate(handle->h_transaction->t_journal,
+			   handle->h_transaction->t_tid);
 
 	jbd2_debug(5, "journal_head %p\n", jh);
 	err = -EROFS;
@@ -1819,6 +1822,8 @@ int jbd2_journal_forget(handle_t *handle, struct buffer_head *bh)
 	int abort_journal = 0;
 	/* CJFS */
 	int ver_tid = jbd2_cjfs_slot(transaction);
+	jbd2_wv_invalidate(handle->h_transaction->t_journal,
+			   handle->h_transaction->t_tid);
 
 	if (is_handle_aborted(handle))
 		return -EROFS;

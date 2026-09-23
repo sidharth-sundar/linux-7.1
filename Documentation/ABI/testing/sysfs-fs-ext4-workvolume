@@ -1,0 +1,46 @@
+What: /sys/fs/ext4/<device>/cjfs/collect_pending_mask
+Date: September 2026
+Contact: CJFS research fork maintainers
+Description:
+ Experimental observation groups: 0 disabled, 1 basic, 3 basic plus ranges.
+ Pending settings are applied by collect_apply=1 while stopped. Only ordered
+ data, internal-journal, non-FC writable ext4 is supported.
+
+What: /sys/fs/ext4/<device>/cjfs/collect_pending_sample_every
+What: /sys/fs/ext4/<device>/cjfs/collect_pending_memory_bytes
+Date: September 2026
+Description:
+ Deterministic block-identity sampling denominator (1..65536) for ranges only,
+ and preallocated history budget (1..64 MiB). Basic counts are not sampled.
+ History collisions and missing baselines use full-image estimates.
+
+What: /sys/fs/ext4/<device>/cjfs/collect_apply
+What: /sys/fs/ext4/<device>/cjfs/collect_start
+What: /sys/fs/ext4/<device>/cjfs/collect_phase
+What: /sys/fs/ext4/<device>/cjfs/collect_stop
+Date: September 2026
+Description:
+ Apply drains and installs pending settings while stopped. Start syncs/drains,
+ resets and starts a session. Phase is 0 (workload), changed once by writing 1
+ to mark drain. Stop requires phase 1 and syncs/drains before stopping probes.
+ Write 1 to apply/start/stop. Quiesce workload writers before phase/stop.
+ CJFS policy application is rejected while collecting. Controls require admin
+ capability and protect mount lifetime. Aborted sessions are invalid; unmount
+ releases the collector. These controls never change the journal log format.
+
+What: /sys/fs/ext4/<device>/cjfs/collect_status
+What: /sys/fs/ext4/<device>/cjfs/collect_workload
+What: /sys/fs/ext4/<device>/cjfs/collect_drain
+Date: September 2026
+Description:
+ Read-only newline-separated key/integer snapshots, schema 1. Status contains
+ session, effective configuration, capacity, timestamps and abort state.
+ Phase files contain accepted BIO write volumes, journal extent intersections,
+ unclassified nonjournal bytes, staged metadata/control counts, existing CJFS
+ copy/transaction events and hypothetical range encoding counts. Atomic
+ counters are approximate while active and frozen after stop.
+ Range estimates compare normalized logged images, not disk baselines. They
+ are not a recovery format. Full fallback applies to unavailable histories.
+ Summing phases accounts for boundary-crossing transactions. Detailed metric
+ semantics and the encoder assumptions are in jrnl-poc/cjfs/live/WORK-VOLUME.md
+ in the accompanying experiment repository.

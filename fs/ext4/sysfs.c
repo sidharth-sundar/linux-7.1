@@ -8,6 +8,7 @@
  *
  */
 
+#include <linux/jbd2_workvolume.h>
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
@@ -83,6 +84,10 @@ static ssize_t cjfs_attr_access(struct ext4_sb_info *sbi, const char *name,
   goto unlock_sb;
  }
  mutex_lock(&j->j_cjfs_config_mutex);
+ if (!in && !strncmp(name, "collect_", 8)) {
+  ret = jbd2_wv_access(j, sb, name, out, NULL, 0);
+  goto unlock_config;
+ }
  if (!in) {
   if (!strcmp(name, "effective"))
    ret = sysfs_emit(out, "%u %s %u %llu\n", j->j_cjfs_depth,
@@ -94,6 +99,11 @@ static ssize_t cjfs_attr_access(struct ext4_sb_info *sbi, const char *name,
    ret = sysfs_emit(out, "%s\n", j->j_cjfs_pending_eager ? "eager" : "lazy");
   else if (!strcmp(name, "pending_coalesce_us"))
    ret = sysfs_emit(out, "%u\n", j->j_cjfs_pending_window_us);
+  goto unlock_config;
+ }
+ if (in && is_journal_aborted(j) &&
+     (!strcmp(name, "collect_phase") || !strcmp(name, "collect_stop"))) {
+  ret = jbd2_wv_access(j, sb, name, NULL, in, count);
   goto unlock_config;
  }
  if (sb_rdonly(sb) || is_journal_aborted(j)) {
@@ -108,6 +118,10 @@ static ssize_t cjfs_attr_access(struct ext4_sb_info *sbi, const char *name,
  if (test_opt(sb, DATA_FLAGS) != EXT4_MOUNT_ORDERED_DATA ||
      test_opt2(sb, JOURNAL_FAST_COMMIT) || j->j_dev != sb->s_bdev) {
   ret = -EOPNOTSUPP;
+  goto unlock_config;
+ }
+ if (!strncmp(name, "collect_", 8)) {
+  ret = jbd2_wv_access(j, sb, name, NULL, in, count);
   goto unlock_config;
  }
  if (!strcmp(name, "pending_copy_mode")) {
@@ -265,7 +279,28 @@ EXT4_ATTR(pending_copy_mode, 0600, cjfs);
 EXT4_ATTR(pending_coalesce_us, 0600, cjfs);
 EXT4_ATTR(effective, 0400, cjfs);
 EXT4_ATTR(apply, 0200, cjfs);
+EXT4_ATTR(collect_pending_mask, 0600, cjfs);
+EXT4_ATTR(collect_pending_sample_every, 0600, cjfs);
+EXT4_ATTR(collect_pending_memory_bytes, 0600, cjfs);
+EXT4_ATTR(collect_apply, 0200, cjfs);
+EXT4_ATTR(collect_start, 0200, cjfs);
+EXT4_ATTR(collect_phase, 0600, cjfs);
+EXT4_ATTR(collect_stop, 0200, cjfs);
+EXT4_ATTR(collect_status, 0400, cjfs);
+EXT4_ATTR(collect_workload, 0400, cjfs);
+EXT4_ATTR(collect_drain, 0400, cjfs);
 static struct attribute *cjfs_attrs[] = {
+ &ext4_attr_collect_pending_mask.attr,
+ &ext4_attr_collect_pending_sample_every.attr,
+ &ext4_attr_collect_pending_memory_bytes.attr,
+ &ext4_attr_collect_apply.attr,
+ &ext4_attr_collect_start.attr,
+ &ext4_attr_collect_phase.attr,
+ &ext4_attr_collect_stop.attr,
+ &ext4_attr_collect_status.attr,
+ &ext4_attr_collect_workload.attr,
+ &ext4_attr_collect_drain.attr,
+
  &ext4_attr_pending_version_depth.attr,
  &ext4_attr_pending_copy_mode.attr,
  &ext4_attr_pending_coalesce_us.attr,
