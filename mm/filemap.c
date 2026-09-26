@@ -510,7 +510,7 @@ int filemap_write_and_dispatch_range(struct address_space *mapping, loff_t lstar
 			filemap_fdatadispatch_range(mapping, lstart, lend);
 		} else {
 			/* Clear any previously stored errors */
-			filemap_check_wb_err(mapping, 0);
+			filemap_check_errors(mapping);
 		}
 	}
 	return err;
@@ -644,7 +644,7 @@ int filemap_fdatawait_range(struct address_space *mapping, loff_t start_byte,
 			    loff_t end_byte)
 {
 	__filemap_fdatawait_range(mapping, start_byte, end_byte);
-	return filemap_check_wb_err(mapping, 0);
+	return filemap_check_errors(mapping);
 }
 EXPORT_SYMBOL(filemap_fdatawait_range);
 
@@ -773,7 +773,13 @@ int filemap_write_and_wait_range(struct address_space *mapping,
 		if (err != -EIO)
 			__filemap_fdatawait_range(mapping, lstart, lend);
 	}
-	err2 = filemap_check_wb_err(mapping, 0);
+	/*
+	 * Preserve the consuming error semantics of this mapping-wide API.
+	 * An errseq check against zero would report an old error forever,
+	 * including on journal recovery after a device becomes writable again.
+	 * File-specific fsync callers retain their own errseq cursors.
+	 */
+	err2 = filemap_check_errors(mapping);
 	if (!err)
 		err = err2;
 	return err;
@@ -4652,7 +4658,7 @@ int filemap_invalidate_inode(struct inode *inode, bool flush,
 unlock:
 	filemap_invalidate_unlock(mapping);
 out:
-	return filemap_check_wb_err(mapping, 0);
+	return filemap_check_errors(mapping);
 }
 EXPORT_SYMBOL_GPL(filemap_invalidate_inode);
 

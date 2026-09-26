@@ -14,6 +14,7 @@
 #include <linux/fs.h>
 #include <linux/jbd2.h>
 #include "interval_diag.h"
+#include "subblock.h"
 #include <trace/events/cjfs.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
@@ -51,6 +52,160 @@ static void journal_end_buffer_io_sync(struct buffer_head *bh, int uptodate)
 		wake_up_bit(&orig_bh->b_state, BH_Shadow);
 	}
 	unlock_buffer(bh);
+}
+
+/* One packed I/O retains the shadow pairing for every source it contains. */
+struct subblock_io {
+	unsigned int count;
+	struct buffer_head *sources[64];
+};
+
+static void journal_end_subblock_io(struct buffer_head *bh, int uptodate)
+{
+	struct subblock_io *io = bh->b_private;
+	unsigned int i;
+
+	for (i = 0; i < io->count; i++)
+		journal_end_buffer_io_sync(io->sources[i], uptodate);
+	bh->b_private = NULL;
+	kfree(io);
+	journal_end_buffer_io_sync(bh, uptodate);
+}
+
+static void journal_submit_subblock(transaction_t *t, struct buffer_head *bh)
+{
+	journal_t *j = t->t_journal;
+
+	jbd2_subblock_set_csum(j, bh);
+	lock_buffer(bh);
+	clear_buffer_dirty(bh);
+	set_buffer_uptodate(bh);
+	bh->b_end_io = journal_end_subblock_io;
+	bh->b_tx = t;
+	j->j_subblock_containers++;
+	submit_bh(REQ_OP_WRITE | REQ_SYNC | REQ_ORDERED, bh);
+}
+
+/*
+ * Harvest compact-eligible buffers before the conventional descriptor loop.
+ * A source fits entirely in one packed block or stays on the full-image path.
+ * Thus packed allocation uses at most one log block per removed source, within
+ * the original full-image credit reservation. get_descriptor_buffer consumes
+ * one credit per actual packed block; do not charge each packed source again.
+ */
+static int journal_pack_subblocks(transaction_t *t, struct list_head *io_bufs,
+				 struct list_head *log_bufs)
+{
+	journal_t *j = t->t_journal;
+	struct journal_head *jh = t->t_buffers;
+	struct buffer_head *packed = NULL;
+	struct subblock_io *io = NULL;
+	unsigned int gran = t->t_subblock_granularity;
+	unsigned int size = j->j_blocksize, units = size / 64;
+	int remaining = t->t_nr_buffers, slot = jbd2_cjfs_slot(t), err = 0;
+
+	if (!gran)
+		return 0;
+	if (!t->t_cjfs_eager || !jbd2_has_feature_subblock(j) ||
+	    !jbd2_has_feature_csum3(j) || !jbd2_sb_size_valid(size))
+		return -EFSCORRUPTED;
+	while (remaining-- && jh && !is_journal_aborted(j)) {
+		struct journal_head *next;
+		struct b_jh_entry *entry = jh->b_jh_entry[slot];
+		struct buffer_head *source = jh2bh(jh), *shadow;
+		unsigned long long mask;
+		unsigned int i, bytes = 0, runs = 0, required, used;
+		const unsigned char *image;
+		int escaped;
+
+		spin_lock(&jh->b_state_lock);
+		next = entry->b_tnext;
+		mask = entry->b_subblock_tid == t->t_tid ?
+			entry->b_subblock_dirty : ~0ULL;
+		if (entry->b_triggers || entry->b_frozen_triggers)
+			mask = ~0ULL;
+		spin_unlock(&jh->b_state_lock);
+		mask = jbd2_sb_expand(mask, gran);
+		if (!mask || mask == ~0ULL || source->b_size != size)
+			goto next;
+		/* Never turn an invalid out-of-block mark into a partial image. */
+		if (units < 64 && (mask >> units))
+			goto next;
+		for (i = 0; i < units; i++) {
+			if (!(mask & (1ULL << i)))
+				continue;
+			bytes += 64;
+			if (!i || !(mask & (1ULL << (i - 1))))
+				runs++;
+		}
+		required = bytes + runs * JBD2_SB_RECORD_SIZE;
+		if (required > size - JBD2_SB_HEADER_SIZE)
+			goto next;
+		used = packed ? jbd2_sb_get16((unsigned char *)packed->b_data + 16) : 0;
+		if (packed && required > size - used) {
+			journal_submit_subblock(t, packed);
+			packed = NULL;
+		}
+		if (!packed) {
+			io = kzalloc(sizeof(*io), GFP_NOFS);
+			if (!io) {
+				err = -ENOMEM;
+				break;
+			}
+			packed = jbd2_journal_get_descriptor_buffer(t, JBD2_SB_TYPE);
+			if (!packed) {
+				kfree(io);
+				err = -EIO;
+				break;
+			}
+			jbd2_sb_init((unsigned char *)packed->b_data, packed->b_size,
+				     t->t_tid, gran);
+			packed->b_private = io;
+			packed->b_cjfs_io_entry = NULL;
+			set_buffer_jwrite(packed);
+			set_buffer_dirty(packed);
+			jbd2_file_log_bh(log_bufs, packed);
+		}
+		atomic_inc(&source->b_count);
+		set_buffer_jwrite(source);
+		/* This temporary bh is never submitted: the packed I/O completes it. */
+		escaped = jbd2_journal_write_metadata_buffer(t, jh, &shadow, 0);
+		J_ASSERT(escaped >= 0);
+		lock_buffer(shadow);
+		clear_buffer_dirty(shadow);
+		jbd2_file_log_bh(io_bufs, shadow);
+		J_ASSERT(io->count < ARRAY_SIZE(io->sources));
+		io->sources[io->count++] = shadow;
+		image = kmap_local_folio(shadow->b_folio,
+					offset_in_folio(shadow->b_folio, shadow->b_data));
+		for (i = 0; i < units;) {
+			unsigned int first, length, pos;
+
+			if (!(mask & (1ULL << i))) {
+				i++;
+				continue;
+			}
+			first = i++;
+			while (i < units && (mask & (1ULL << i)))
+				i++;
+			length = (i - first) * 64;
+			pos = jbd2_sb_get16((unsigned char *)packed->b_data + 16);
+			J_ASSERT(!jbd2_sb_append((unsigned char *)packed->b_data,
+				packed->b_size, source->b_blocknr, first * 64, length, image));
+			/* Inline payload is unescaped; its magic cannot be a log header. */
+			if (escaped && !first)
+				jbd2_sb_put32((unsigned char *)packed->b_data + pos +
+					      JBD2_SB_RECORD_SIZE, JBD2_MAGIC_NUMBER);
+		}
+		kunmap_local(image);
+		j->j_subblock_images++;
+		j->j_subblock_payload_bytes += bytes;
+next:
+		jh = next;
+	}
+	if (packed)
+		journal_submit_subblock(t, packed);
+	return err;
 }
 
 /*
@@ -158,7 +313,13 @@ static int journal_submit_commit_record(journal_t *journal,
 
 	if (journal->j_flags & JBD2_BARRIER &&
 	    !jbd2_has_feature_async_commit(journal))
-		write_flags |= REQ_ORDERED | REQ_BARRIER;
+		/* Custom dispatch ordering is not a persistence contract for
+		 * ordinary block devices (or recorded crash replay). The commit
+		 * must not become durable before its descriptor/data blocks, even
+		 * if power fails before the flush thread's later device flush.
+		 * Keep standard JBD2 preflush/FUA protection on that boundary.
+		 */
+		write_flags |= REQ_ORDERED | REQ_BARRIER | REQ_PREFLUSH | REQ_FUA;
 
 	submit_bh(write_flags, bh);
 	*cbh = bh;
@@ -1545,7 +1706,13 @@ op_coalescing:
 	journal->j_running_transaction = NULL;
 	commit_transaction->t_commit_start_time = ktime_get();
 	commit_transaction->t_log_start = journal->j_head;
-	wake_up(&journal->j_wait_transaction_locked);
+	/*
+	 * Admission waiters are exclusive. Wake all of them when the running
+	 * transaction becomes available again: ordered-data submission below
+	 * can wait for writeback whose reserved/new handle is sleeping here.
+	 * Waking only one waiter can strand that writeback and deadlock commit.
+	 */
+	wake_up_all(&journal->j_wait_transaction_locked);
 	write_unlock(&journal->j_state_lock);
 
 	jbd2_debug(3, "JBD2: commit phase 2a\n");
@@ -1587,6 +1754,9 @@ op_coalescing:
 	bufs = 0;
 	descriptor = NULL;
 	dispatch_start = ktime_get();
+	err = journal_pack_subblocks(commit_transaction, &t_io_bufs, &t_log_bufs);
+	if (err)
+		jbd2_journal_abort(journal, err);
 	while (commit_transaction->t_buffers) {
 
 		/* Find the next buffer to be journaled... */

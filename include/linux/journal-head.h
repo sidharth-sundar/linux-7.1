@@ -122,6 +122,9 @@ struct journal_head {
 
 /* CJFS-MVSP */
 struct b_jh_entry {
+	/* Dirty 64-byte units for this version, protected by b_state_lock. */
+	unsigned long long b_subblock_dirty;
+	tid_t b_subblock_tid;
 	/* Set until this version's journal I/O has completed. */
 	unsigned long b_io_state;
 	unsigned 				b_jlist;

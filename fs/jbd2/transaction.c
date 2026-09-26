@@ -19,6 +19,7 @@
 #include <linux/fs.h>
 #include <linux/jbd2.h>
 #include "interval_diag.h"
+#include "subblock_format.h"
 #include <trace/events/cjfs.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
@@ -92,6 +93,7 @@ static void jbd2_get_transaction(journal_t *journal,
 	transaction->t_tid = journal->j_transaction_sequence++;
 	transaction->t_cjfs_depth = journal->j_cjfs_depth;
 	transaction->t_cjfs_eager = journal->j_cjfs_eager;
+	transaction->t_subblock_granularity = journal->j_subblock_granularity;
 	transaction->t_cjfs_window_us = journal->j_cjfs_window_us;
 	transaction->t_cjfs_generation = journal->j_cjfs_generation;
 	transaction->t_expires = jiffies + journal->j_commit_interval;
@@ -1145,6 +1147,8 @@ retry:
 	}
 
 	entry->b_modified = 0;
+	entry->b_subblock_tid = transaction->t_tid;
+	entry->b_subblock_dirty = 0;
 	entry->b_triggers = jh->b_triggers;
 	spin_lock(&journal->j_list_lock);
 	if (test_clear_buffer_dirty(bh))
@@ -1370,6 +1374,9 @@ int jbd2_journal_get_create_access(handle_t *handle, struct buffer_head *bh)
 	/* CJFS */
 	J_ASSERT_JH(jh, jh->b_jh_entry[ver_tid]->b_next_transaction == NULL);
 	J_ASSERT_JH(jh, buffer_locked(jh2bh(jh)));
+	/* A newly created/reused metadata block needs a complete initializer. */
+	jh->b_jh_entry[ver_tid]->b_subblock_tid = transaction->t_tid;
+	jh->b_jh_entry[ver_tid]->b_subblock_dirty = ~0ULL;
 
 	/* CJFS */
 	if (jh->b_jh_entry[ver_tid]->b_transaction == NULL) {
@@ -1545,10 +1552,31 @@ void jbd2_journal_set_triggers(struct buffer_head *bh,
 			       struct jbd2_buffer_trigger_type *type)
 {
 	struct journal_head *jh = jbd2_journal_grab_journal_head(bh);
+	unsigned int v;
 
 	if (WARN_ON_ONCE(!jh))
 		return;
+	spin_lock(&jh->b_state_lock);
 	jh->b_triggers = type;
+	/*
+	 * Filesystems install triggers AFTER obtaining write/create access.
+	 * Copying b_triggers only when assigning a CJFS slot therefore misses
+	 * the first installation (notably the ext4 orphan-file checksum).
+	 * Access acquisition preserves older metadata before allowing the
+	 * caller to modify the live buffer. Update only owners of that live
+	 * image; frozen and submitted versions retain their original triggers.
+	 */
+	for (v = 0; v < CJFS_MAX_VERSIONS; v++) {
+		struct b_jh_entry *entry = jh->b_jh_entry[v];
+
+		if (!entry->b_transaction || entry->b_frozen_data ||
+		    entry->b_jlist == BJ_Shadow)
+			continue;
+		entry->b_triggers = type;
+		if (type)
+			entry->b_subblock_dirty = ~0ULL;
+	}
+	spin_unlock(&jh->b_state_lock);
 	jbd2_journal_put_journal_head(jh);
 }
 
@@ -1595,11 +1623,8 @@ void jbd2_buffer_abort_trigger(struct journal_head *jh,
  * buffer: that only gets done when the old transaction finally
  * completes its commit.
  */
-#ifdef CONFIG_JBD2_INTERVAL_DIAG
-static int ji_impl_jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
-#else
-int jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
-#endif
+static int __jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh,
+				       unsigned int offset, unsigned int length)
 {
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal = transaction->t_journal;
@@ -1608,6 +1633,8 @@ int jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
 	/* CJFS */
 	int ver_tid = jbd2_cjfs_slot(transaction);
 
+	if (offset >= bh->b_size || !length || length > bh->b_size - offset)
+		return -EINVAL;
 	if (!buffer_jbd(bh))
 		return -EUCLEAN;
 
@@ -1643,6 +1670,28 @@ int jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
 		}
 		spin_unlock(&jh->b_state_lock);
 	}*/
+	/*
+	 * Even an already-dirty buffer may acquire new dirty ranges. Union before
+	 * the first-dirty fast path; full-buffer callers conservatively dominate.
+	 * Payload is not read here: other handles may still update this version.
+	 */
+	if (transaction->t_subblock_granularity) {
+		struct b_jh_entry *entry = jh->b_jh_entry[ver_tid];
+
+		if (!jbd2_sb_size_valid(bh->b_size) ||
+		    bh->b_size != journal->j_blocksize)
+			return -EINVAL;
+		spin_lock(&jh->b_state_lock);
+		if (entry->b_subblock_tid != transaction->t_tid) {
+			entry->b_subblock_tid = transaction->t_tid;
+			entry->b_subblock_dirty = 0;
+		}
+		if (entry->b_triggers)
+			entry->b_subblock_dirty = ~0ULL;
+		else
+			jbd2_sb_mark(&entry->b_subblock_dirty, offset, length);
+		spin_unlock(&jh->b_state_lock);
+	}
 	if (jh->b_jh_entry[ver_tid]->b_modified == 1) {
 		/* If it's in our transaction it must be in BJ_Metadata list. */
 		if (data_race(jh->b_jh_entry[ver_tid]->b_transaction == transaction &&
@@ -1773,21 +1822,39 @@ out:
 	JBUFFER_TRACE(jh, "exit");
 	return ret;
 }
-#ifdef CONFIG_JBD2_INTERVAL_DIAG
-int jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
+/**
+ * jbd2_journal_dirty_metadata_range - conservatively mark a byte write-set
+ * @handle: active handle protecting the transaction lifetime
+ * @bh: buffer previously acquired with journal write/create access
+ * @offset: first possibly modified byte
+ * @length: number of possibly modified bytes, including checksums
+ *
+ * Callers must cover all their modifications under the same filesystem locking
+ * rules as jbd2_journal_dirty_metadata(). This does not snapshot source bytes.
+ */
+int jbd2_journal_dirty_metadata_range(handle_t *handle, struct buffer_head *bh,
+				      unsigned int offset, unsigned int length)
 {
+#ifdef CONFIG_JBD2_INTERVAL_DIAG
 	struct jbd2_interval_ctx ctx;
 	int ret;
 
 	if (!trace_jbd2_interval_enabled())
-		return ji_impl_jbd2_journal_dirty_metadata(handle, bh);
+		return __jbd2_journal_dirty_metadata(handle, bh, offset, length);
 	ctx = ji_handle(handle);
 	ji_emit(ctx, JI_DIRTY, true, 0);
-	ret = ji_impl_jbd2_journal_dirty_metadata(handle, bh);
+	ret = __jbd2_journal_dirty_metadata(handle, bh, offset, length);
 	ji_emit(ctx, JI_DIRTY, false, ret);
 	return ret;
-}
+#else
+	return __jbd2_journal_dirty_metadata(handle, bh, offset, length);
 #endif
+}
+
+int jbd2_journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
+{
+	return jbd2_journal_dirty_metadata_range(handle, bh, 0, bh->b_size);
+}
 
 /**
  * jbd2_journal_forget() - bforget() for potentially-journaled buffers.

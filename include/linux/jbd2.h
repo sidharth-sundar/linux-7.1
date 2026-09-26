@@ -284,6 +284,8 @@ typedef struct journal_superblock_s
 #define JBD2_FEATURE_INCOMPAT_CSUM_V2		0x00000008
 #define JBD2_FEATURE_INCOMPAT_CSUM_V3		0x00000010
 #define JBD2_FEATURE_INCOMPAT_FAST_COMMIT	0x00000020
+/* Private research format; deliberately rejected by unmodified readers. */
+#define JBD2_FEATURE_INCOMPAT_SUBBLOCK		0x80000000U
 
 /* See "journal feature predicate functions" below */
 
@@ -295,7 +297,8 @@ typedef struct journal_superblock_s
 					JBD2_FEATURE_INCOMPAT_ASYNC_COMMIT | \
 					JBD2_FEATURE_INCOMPAT_CSUM_V2 | \
 					JBD2_FEATURE_INCOMPAT_CSUM_V3 | \
-					JBD2_FEATURE_INCOMPAT_FAST_COMMIT)
+					JBD2_FEATURE_INCOMPAT_FAST_COMMIT | \
+					JBD2_FEATURE_INCOMPAT_SUBBLOCK)
 
 #ifdef __KERNEL__
 
@@ -591,6 +594,8 @@ struct transaction_stats_s {
 
 struct transaction_s
 {
+	/* Zero keeps the existing full-block format. Frozen at transaction start. */
+	unsigned int t_subblock_granularity;
 	unsigned int t_cjfs_depth;
 	bool t_cjfs_eager;
 	unsigned int t_cjfs_window_us;
@@ -843,6 +848,12 @@ struct journal_s
 	bool j_cjfs_eager, j_cjfs_reconfiguring;
 	unsigned int j_cjfs_pending_depth, j_cjfs_pending_window_us;
 	bool j_cjfs_pending_eager;
+	/* Experimental compact journal; no runtime enablement until replay exists. */
+	unsigned int j_subblock_granularity;
+	unsigned int j_subblock_pending_granularity;
+	/* Commit-thread counters; snapshot with READ_ONCE, not a durability ledger. */
+	u64 j_subblock_containers, j_subblock_images, j_subblock_payload_bytes;
+	u64 j_subblock_replayed;
 	u64 j_cjfs_generation;
 	/**
 	 * @j_flags: General journaling state flags [j_state_lock,
@@ -1507,6 +1518,7 @@ JBD2_FEATURE_INCOMPAT_FUNCS(async_commit,	ASYNC_COMMIT)
 JBD2_FEATURE_INCOMPAT_FUNCS(csum2,		CSUM_V2)
 JBD2_FEATURE_INCOMPAT_FUNCS(csum3,		CSUM_V3)
 JBD2_FEATURE_INCOMPAT_FUNCS(fast_commit,	FAST_COMMIT)
+JBD2_FEATURE_INCOMPAT_FUNCS(subblock,	SUBBLOCK)
 
 /* Journal high priority write IO operation flags */
 #define JBD2_JOURNAL_REQ_FLAGS		(REQ_META | REQ_SYNC | REQ_IDLE)
@@ -1662,6 +1674,8 @@ extern int	 jbd2_journal_get_undo_access(handle_t *, struct buffer_head *);
 void		 jbd2_journal_set_triggers(struct buffer_head *,
 					   struct jbd2_buffer_trigger_type *type);
 extern int	 jbd2_journal_dirty_metadata (handle_t *, struct buffer_head *);
+extern int jbd2_journal_dirty_metadata_range(handle_t *, struct buffer_head *,
+					    unsigned int, unsigned int);
 extern int	 jbd2_journal_forget (handle_t *, struct buffer_head *);
 int jbd2_journal_invalidate_folio(journal_t *, struct folio *,
 					size_t offset, size_t length);

@@ -99,6 +99,13 @@ static ssize_t cjfs_attr_access(struct ext4_sb_info *sbi, const char *name,
    ret = sysfs_emit(out, "%s\n", j->j_cjfs_pending_eager ? "eager" : "lazy");
   else if (!strcmp(name, "pending_coalesce_us"))
    ret = sysfs_emit(out, "%u\n", j->j_cjfs_pending_window_us);
+  else if (!strcmp(name, "pending_subblock_granularity"))
+   ret = sysfs_emit(out, "%u\n", j->j_subblock_pending_granularity);
+  else if (!strcmp(name, "subblock_status"))
+   ret = sysfs_emit(out, "%u %llu %llu %llu %llu\n",
+      j->j_subblock_granularity,
+      READ_ONCE(j->j_subblock_containers), READ_ONCE(j->j_subblock_images),
+      READ_ONCE(j->j_subblock_payload_bytes), READ_ONCE(j->j_subblock_replayed));
   goto unlock_config;
  }
  if (in && is_journal_aborted(j) &&
@@ -144,6 +151,10 @@ static ssize_t cjfs_attr_access(struct ext4_sb_info *sbi, const char *name,
    if (value > 10000)
     goto unlock_config;
    j->j_cjfs_pending_window_us = value;
+  } else if (!strcmp(name, "pending_subblock_granularity")) {
+   if (value && value != 64 && value != 128 && value != 256)
+    goto unlock_config;
+   j->j_subblock_pending_granularity = value;
   } else if (!strcmp(name, "apply")) {
    if (value != 1)
     goto unlock_config;
@@ -278,6 +289,8 @@ EXT4_ATTR(pending_version_depth, 0600, cjfs);
 EXT4_ATTR(pending_copy_mode, 0600, cjfs);
 EXT4_ATTR(pending_coalesce_us, 0600, cjfs);
 EXT4_ATTR(effective, 0400, cjfs);
+EXT4_ATTR(pending_subblock_granularity, 0600, cjfs);
+EXT4_ATTR(subblock_status, 0400, cjfs);
 EXT4_ATTR(apply, 0200, cjfs);
 EXT4_ATTR(collect_pending_mask, 0600, cjfs);
 EXT4_ATTR(collect_pending_sample_every, 0600, cjfs);
@@ -305,6 +318,8 @@ static struct attribute *cjfs_attrs[] = {
  &ext4_attr_pending_copy_mode.attr,
  &ext4_attr_pending_coalesce_us.attr,
  &ext4_attr_effective.attr,
+ &ext4_attr_pending_subblock_granularity.attr,
+ &ext4_attr_subblock_status.attr,
  &ext4_attr_apply.attr,
  NULL,
 };
@@ -848,4 +863,3 @@ void ext4_exit_sysfs(void)
 	remove_proc_entry(proc_dirname, NULL);
 	ext4_proc_root = NULL;
 }
-

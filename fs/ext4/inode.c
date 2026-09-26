@@ -5700,7 +5700,14 @@ static int ext4_do_update_inode(handle_t *handle,
 					      bh->b_data);
 
 	BUFFER_TRACE(bh, "call ext4_handle_dirty_metadata");
-	err = ext4_handle_dirty_metadata(handle, NULL, bh);
+	/* Lazytime may update neighboring inodes; otherwise include this entire
+	 * inode (including both checksum fields), not just the requested field.
+	 */
+	if (inode->i_sb->s_flags & SB_LAZYTIME)
+		err = ext4_handle_dirty_metadata(handle, NULL, bh);
+	else
+		err = ext4_handle_dirty_metadata_range(handle, NULL, bh,
+				iloc->offset, EXT4_SB(sb)->s_inode_size);
 	if (err)
 		goto out_error;
 	ext4_clear_inode_state(inode, EXT4_STATE_NEW);

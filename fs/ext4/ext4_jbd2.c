@@ -350,9 +350,10 @@ int __ext4_journal_get_create_access(const char *where, unsigned int line,
 	return 0;
 }
 
-int __ext4_handle_dirty_metadata(const char *where, unsigned int line,
+int __ext4_handle_dirty_metadata_range(const char *where, unsigned int line,
 				 handle_t *handle, struct inode *inode,
-				 struct buffer_head *bh)
+				 struct buffer_head *bh, unsigned int offset,
+				 unsigned int length)
 {
 	int err = 0;
 
@@ -362,7 +363,7 @@ int __ext4_handle_dirty_metadata(const char *where, unsigned int line,
 	set_buffer_prio(bh);
 	set_buffer_uptodate(bh);
 	if (ext4_handle_valid(handle)) {
-		err = jbd2_journal_dirty_metadata(handle, bh);
+		err = jbd2_journal_dirty_metadata_range(handle, bh, offset, length);
 		/* Errors can only happen due to aborted journal or a nasty bug */
 		if (!is_handle_aborted(handle) && WARN_ON_ONCE(err)) {
 			ext4_journal_abort_handle(where, line, __func__, bh,
@@ -405,4 +406,12 @@ int __ext4_handle_dirty_metadata(const char *where, unsigned int line,
 		}
 	}
 	return err;
+}
+
+int __ext4_handle_dirty_metadata(const char *where, unsigned int line,
+				 handle_t *handle, struct inode *inode,
+				 struct buffer_head *bh)
+{
+	return __ext4_handle_dirty_metadata_range(where, line, handle, inode, bh,
+						 0, bh->b_size);
 }

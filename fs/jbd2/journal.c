@@ -67,6 +67,7 @@ EXPORT_SYMBOL(jbd2_journal_get_create_access);
 EXPORT_SYMBOL(jbd2_journal_get_undo_access);
 EXPORT_SYMBOL(jbd2_journal_set_triggers);
 EXPORT_SYMBOL(jbd2_journal_dirty_metadata);
+EXPORT_SYMBOL_GPL(jbd2_journal_dirty_metadata_range);
 EXPORT_SYMBOL(jbd2_journal_forget);
 EXPORT_SYMBOL(jbd2_journal_flush);
 EXPORT_SYMBOL(jbd2_journal_revoke);
@@ -2120,6 +2121,8 @@ static int journal_reset(journal_t *journal)
 	 * disabled it, we don't enable fast commits.
 	 */
 	jbd2_clear_feature_fast_commit(journal);
+	/* Recovery consumed any compact log; new mounts default to full images. */
+	jbd2_clear_feature_subblock(journal);
 
 	/*
 	 * As a special case, if the on-disk copy is already marked as needing
@@ -2277,6 +2280,7 @@ static void jbd2_mark_journal_empty(journal_t *journal, blk_opf_t write_flags)
 {
 	journal_superblock_t *sb = journal->j_superblock;
 	bool had_fast_commit = false;
+	bool had_subblock = false;
 
 	BUG_ON(!mutex_is_locked(&journal->j_checkpoint_mutex));
 	lock_buffer(journal->j_sb_buffer);
@@ -2300,10 +2304,16 @@ static void jbd2_mark_journal_empty(journal_t *journal, blk_opf_t write_flags)
 		had_fast_commit = true;
 	}
 
+	if (jbd2_has_feature_subblock(journal)) {
+		jbd2_clear_feature_subblock(journal);
+		had_subblock = true;
+	}
 	jbd2_write_superblock(journal, write_flags);
 
 	if (had_fast_commit)
 		jbd2_set_feature_fast_commit(journal);
+	if (had_subblock)
+		jbd2_set_feature_subblock(journal);
 
 	/* Log is empty */
 	write_lock(&journal->j_state_lock);

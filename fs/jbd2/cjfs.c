@@ -2,6 +2,7 @@
 /* Quiescent runtime configuration for the CJFS experiment. */
 #include <linux/jbd2.h>
 #include <linux/jbd2_workvolume.h>
+#include "subblock_format.h"
 #define CREATE_TRACE_POINTS
 #include <trace/events/cjfs.h>
 
@@ -19,6 +20,16 @@ int jbd2_cjfs_reconfigure(journal_t *journal)
   return -EINVAL;
  if (is_journal_aborted(journal))
   return -EROFS;
+ if (journal->j_subblock_pending_granularity &&
+     ((journal->j_subblock_pending_granularity != 64 &&
+       journal->j_subblock_pending_granularity != 128 &&
+       journal->j_subblock_pending_granularity != 256) ||
+      !journal->j_cjfs_pending_eager ||
+      journal->j_cjfs_pending_depth != 1 ||
+      !jbd2_sb_size_valid(journal->j_blocksize) ||
+      !jbd2_has_feature_csum3(journal) ||
+      jbd2_has_feature_fast_commit(journal)))
+  return -EOPNOTSUPP;
  WRITE_ONCE(journal->j_cjfs_reconfiguring, true);
  wake_up_all(&journal->j_wait_done_flush);
  /* Existing reserved handles must be allowed to finish under this barrier. */
@@ -45,6 +56,18 @@ int jbd2_cjfs_reconfigure(journal_t *journal)
  }
  spin_unlock(&journal->j_list_lock);
  write_unlock(&journal->j_state_lock);
+ if (!err) {
+  /* Updates remain barred and the old log is fully checkpointed. The
+   * next commit persists the feature before using the empty journal.
+   */
+  lock_buffer(journal->j_sb_buffer);
+  if (journal->j_subblock_pending_granularity)
+   jbd2_set_feature_subblock(journal);
+  else
+   jbd2_clear_feature_subblock(journal);
+  journal->j_subblock_granularity = journal->j_subblock_pending_granularity;
+  unlock_buffer(journal->j_sb_buffer);
+ }
 out:
  WRITE_ONCE(journal->j_cjfs_reconfiguring, false);
  jbd2_journal_unlock_updates(journal);

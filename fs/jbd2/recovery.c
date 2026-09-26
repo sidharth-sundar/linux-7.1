@@ -20,6 +20,7 @@
 #include <linux/crc32.h>
 #include <linux/blkdev.h>
 #include <linux/string_choices.h>
+#include "subblock.h"
 #endif
 
 /*
@@ -585,6 +586,48 @@ skip_write:
 	return ret;
 }
 
+static int jbd2_replay_subblocks(journal_t *j, struct recovery_info *info,
+				struct buffer_head *bh, tid_t tid)
+{
+	const unsigned char *data = (unsigned char *)bh->b_data;
+	unsigned int pos = JBD2_SB_HEADER_SIZE, used = jbd2_sb_get16(data + 16);
+	u64 device_blocks = bdev_nr_bytes(j->j_fs_dev) / j->j_blocksize;
+
+	/* Validate every destination before changing any home buffer. */
+	while (pos < used) {
+		if (jbd2_sb_get64(data + pos) >= device_blocks)
+			return -EFSCORRUPTED;
+		pos += JBD2_SB_RECORD_SIZE + jbd2_sb_get16(data + pos + 10);
+	}
+	pos = JBD2_SB_HEADER_SIZE;
+	while (pos < used) {
+		u64 block = jbd2_sb_get64(data + pos);
+		unsigned int offset = jbd2_sb_get16(data + pos + 8);
+		unsigned int length = jbd2_sb_get16(data + pos + 10);
+		struct buffer_head *home;
+
+		if (jbd2_journal_test_revoke(j, block, tid)) {
+			info->nr_revoke_hits++;
+			goto next;
+		}
+		/* Unlike full redo, partial redo must preserve valid untouched bytes. */
+		home = __bread(j->j_fs_dev, block, j->j_blocksize);
+		if (!home)
+			return -EIO;
+		lock_buffer(home);
+		memcpy(home->b_data + offset, data + pos + JBD2_SB_RECORD_SIZE, length);
+		set_buffer_uptodate(home);
+		mark_buffer_dirty(home);
+		unlock_buffer(home);
+		brelse(home);
+		info->nr_replays++;
+		j->j_subblock_replayed++;
+next:
+		pos += JBD2_SB_RECORD_SIZE + length;
+	}
+	return 0;
+}
+
 static int do_one_pass(journal_t *journal,
 			struct recovery_info *info, enum passtype pass)
 {
@@ -701,6 +744,29 @@ static int do_one_pass(journal_t *journal,
 		 * to do with it?  That depends on the pass... */
 
 		switch(blocktype) {
+		case JBD2_SB_TYPE:
+			if (!jbd2_has_feature_subblock(journal) ||
+			    !jbd2_has_feature_csum3(journal)) {
+				err = -EFSCORRUPTED;
+				goto failed;
+			}
+			err = jbd2_subblock_validate(journal, bh, next_commit_ID);
+			if (err) {
+				/* As for descriptors, a stale/torn uncommitted suffix is
+				 * distinguished by the following commit's validity/time.
+				 */
+				if (pass != PASS_SCAN)
+					goto failed;
+				need_check_commit_time = true;
+				continue;
+			}
+			if (pass == PASS_REPLAY) {
+				err = jbd2_replay_subblocks(journal, info, bh, next_commit_ID);
+				if (err)
+					goto failed;
+			}
+			/* Container payload is inline: no tag-count block skipping. */
+			continue;
 		case JBD2_DESCRIPTOR_BLOCK:
 			/* Verify checksum first */
 			if (!jbd2_descriptor_block_csum_verify(journal,
