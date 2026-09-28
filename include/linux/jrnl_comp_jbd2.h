@@ -1645,10 +1645,8 @@ extern void jrnl_comp_jbd2_journal_free_transaction(jrnl_comp_transaction_t *);
  * journal structures from interrupts.
  */
 
-static inline jrnl_comp_handle_t *jrnl_comp_journal_current_handle(void)
-{
-	return current->jrnl_comp_journal_info;
-}
+jrnl_comp_handle_t *jrnl_comp_journal_current_handle(void);
+void jrnl_comp_journal_set_current_handle(jrnl_comp_handle_t *handle);
 
 /* The journaling code user interface:
  *

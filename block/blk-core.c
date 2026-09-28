@@ -39,7 +39,6 @@
 #include <linux/bpf.h>
 #include <linux/part_stat.h>
 #include <linux/sched/sysctl.h>
-#include <linux/sched/mm.h>
 #include <linux/blk-crypto.h>
 
 #define CREATE_TRACE_POINTS
@@ -57,7 +56,6 @@ struct dentry *blk_debugfs_root;
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_remap);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_remap);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_complete);
-EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_queue);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_split);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_unplug);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_insert);
@@ -68,44 +66,6 @@ static DEFINE_IDA(blk_queue_ida);
  * For queue allocation
  */
 static struct kmem_cache *blk_requestq_cachep;
-
-/* Created only by explicit experimental I/O; retained for kernel lifetime. */
-static struct kmem_cache *jrnl_comp_epoch_cachep;
-static DEFINE_MUTEX(jrnl_comp_epoch_pool_lock);
-
-/* Caller holds a queue reference. Stock queue creation never allocates this. */
-int blk_jrnl_comp_init_epoch_pool(struct request_queue *q)
-{
-	mempool_t *pool;
-	unsigned int nofs;
-	int err = 0;
-
-	if (smp_load_acquire(&q->epoch_pool))
-		return 0;
-	mutex_lock(&jrnl_comp_epoch_pool_lock);
-	/* Cache creation allocates internally: avoid filesystem reclaim recursion. */
-	nofs = memalloc_nofs_save();
-	if (!jrnl_comp_epoch_cachep) {
-		jrnl_comp_epoch_cachep = kmem_cache_create("jrnl_comp_epoch",
-				sizeof(struct epoch), 0, 0, NULL);
-		if (!jrnl_comp_epoch_cachep) {
-			err = -ENOMEM;
-			goto out;
-		}
-	}
-	if (!q->epoch_pool) {
-		pool = mempool_create_node(BLKDEV_MIN_RQ, mempool_alloc_slab,
-			mempool_free_slab, jrnl_comp_epoch_cachep, GFP_NOFS, q->node);
-		if (!pool)
-			err = -ENOMEM;
-		else
-			smp_store_release(&q->epoch_pool, pool);
-	}
-out:
-	memalloc_nofs_restore(nofs);
-	mutex_unlock(&jrnl_comp_epoch_pool_lock);
-	return err;
-}
 
 /*
  * Controlling structure to kblockd
@@ -296,7 +256,6 @@ static void blk_free_queue_rcu(struct rcu_head *rcu_head)
 
 static void blk_free_queue(struct request_queue *q)
 {
-	mempool_destroy(q->epoch_pool);
 	blk_free_queue_stats(q->stats);
 	if (queue_is_mq(q))
 		blk_mq_release(q);
@@ -509,7 +468,6 @@ struct request_queue *blk_alloc_queue(struct queue_limits *lim, int node_id)
 	return q;
 
 fail_stats:
-	mempool_destroy(q->epoch_pool);
 	blk_free_queue_stats(q->stats);
 fail_id:
 	ida_free(&blk_queue_ida, q->id);
@@ -1301,38 +1259,6 @@ void blk_finish_plug(struct blk_plug *plug)
 	}
 }
 EXPORT_SYMBOL(blk_finish_plug);
-
-/* UFS */
-void blk_issue_barrier_plug()
-{
-	if (current->__epoch)
-		blk_finish_epoch();
-	else
-		current->barrier_fail = 1;
-}
-EXPORT_SYMBOL(blk_issue_barrier_plug);
-
-/* UFS */
-void blk_request_dispatched(struct request *req)
-{
-	struct bio *bio;
-
-	if (!(req->cmd_bflags & REQ_ORDERED))
-		return;
-	for (bio = req->bio; bio; bio = bio->bi_next) {
-		struct epoch *epoch = xchg(&bio->bi_epoch, NULL);
-
-		if (epoch) {
-			if (blk_epoch_retire_pending(epoch, true))
-				req->cmd_bflags |= REQ_BARRIER;
-			put_epoch(epoch);
-		}
-		/* Large folios may span requests; use writeback completion there. */
-		dispatch_bio_bh(bio);
-	}
-}
-
-EXPORT_SYMBOL(blk_request_dispatched);
 
 void blk_io_schedule(void)
 {

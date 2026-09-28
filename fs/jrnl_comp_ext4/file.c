@@ -993,7 +993,6 @@ const struct file_operations jrnl_comp_ext4_file_operations = {
 			  FOP_DONTCACHE,
 	.setlease	= generic_setlease,
 	/* UFS */
-	.fbarrier	= jrnl_comp_ext4_fbarrier_file,
 };
 
 const struct inode_operations jrnl_comp_ext4_file_inode_operations = {
@@ -1006,4 +1005,3 @@ const struct inode_operations jrnl_comp_ext4_file_inode_operations = {
 	.fileattr_get	= jrnl_comp_ext4_fileattr_get,
 	.fileattr_set	= jrnl_comp_ext4_fileattr_set,
 };
-

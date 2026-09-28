@@ -30,7 +30,6 @@
 #include <linux/error-injection.h>
 #include <linux/hash.h>
 #include <linux/writeback.h>
-#include <linux/blkdev.h>
 #include <linux/backing-dev.h>
 #include <linux/folio_batch.h>
 #include <linux/security.h>
@@ -126,12 +125,6 @@
  *    ->inode->i_lock		(zap_pte_range->set_page_dirty)
  *    ->private_lock		(zap_pte_range->block_dirty_folio)
  */
-
-/* Returns true if writeback might be needed or already in progress. */
-static bool mapping_needs_writeback(struct address_space *mapping)
-{
-	return mapping->nrpages;
-}
 
 static void page_cache_delete(struct address_space *mapping,
 				   struct folio *folio, void *shadow)
@@ -386,25 +379,13 @@ static int filemap_writeback(struct address_space *mapping, loff_t start,
 		.range_end	= end,
 	};
 	int ret;
-	struct blk_plug plug;
 
-	if (!test_bit(AS_JRNL_COMP, &mapping->flags) &&
-	    (sync_mode == WB_ORDERED_ALL || sync_mode == WB_BARRIER_ALL))
-		return -EOPNOTSUPP;
 	if (!mapping_can_writeback(mapping) ||
 	    !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
 		return 0;
+
 	wbc_attach_fdatawrite_inode(&wbc, mapping->host);
-	if (test_bit(AS_JRNL_COMP, &mapping->flags)) {
-		blk_start_plug(&plug);
-		ret = do_writepages(mapping, &wbc);
-		if (sync_mode == WB_BARRIER_ALL && current->__epoch)
-			blk_finish_epoch();
-		blk_finish_plug(&plug);
-	} else {
-		/* Stock branch: same call sequence as the pinned baseline. */
-		ret = do_writepages(mapping, &wbc);
-	}
+	ret = do_writepages(mapping, &wbc);
 	wbc_detach_inode(&wbc);
 
 	if (!ret && nr_to_write)
@@ -456,86 +437,6 @@ int filemap_flush_range(struct address_space *mapping, loff_t start,
 	return filemap_writeback(mapping, start, end, WB_SYNC_NONE, NULL);
 }
 EXPORT_SYMBOL_GPL(filemap_flush_range);
-
-/* UFS */
-void filemap_fdatadispatch_range(struct address_space *mapping,
-				     loff_t start_byte, loff_t end_byte)
-{
-	pgoff_t index = start_byte >> PAGE_SHIFT;
-	pgoff_t end = end_byte >> PAGE_SHIFT;
-	struct folio_batch pvec;
-	int nr_pages;
-
-	/* Void wait API: unmarked mappings must never enter dispatch waits. */
-	if (!test_bit(AS_JRNL_COMP, &mapping->flags))
-		return;
-	if (end_byte < start_byte)
-		return;
-
-	folio_batch_init(&pvec);
-	while (index <= end) {
-		unsigned i;
-
-		nr_pages = filemap_get_folios_tag(mapping, &index, end, PAGECACHE_TAG_WRITEBACK, &pvec);
-		if (!nr_pages)
-			break;
-
-		for (i = 0; i < nr_pages; i++) {
-			struct folio *folio = pvec.folios[i];
-
-			folio_wait_dispatch(folio);
-		}
-		folio_batch_release(&pvec);
-		cond_resched();
-	}
-}
-EXPORT_SYMBOL(filemap_fdatadispatch_range);
-
-/* UFS */
-void filemap_fdatadispatch(struct address_space *mapping)
-{
-	loff_t i_size = i_size_read(mapping->host);
-
-	if (i_size == 0)
-		return ;
-
-	filemap_fdatadispatch_range(mapping, 0, i_size - 1);
-	return;
-}
-EXPORT_SYMBOL(filemap_fdatadispatch);
-
-int filemap_write_and_dispatch_range(struct address_space *mapping, loff_t lstart, loff_t lend)
-{
-	int err = 0;
-
-	if (!test_bit(AS_JRNL_COMP, &mapping->flags))
-		return -EOPNOTSUPP;
-	if (mapping_needs_writeback(mapping)) {
-		err = filemap_writeback(mapping, lstart, lend, WB_ORDERED_ALL, NULL);
-		/*
-		 * Even if the above returned error, the pages may be
-		 * written partially (e.g. -ENOSPC), so we wait for it.
-		 * But the -EIO is special case, it may indicate the worst
-		 * thing (e.g. bug) happened, so we avoid waiting for it.
-		 */
-		if (err != -EIO) {
-			filemap_fdatadispatch_range(mapping, lstart, lend);
-		} else {
-			/* Clear any previously stored errors */
-			filemap_check_errors(mapping);
-		}
-	}
-	return err;
-}
-EXPORT_SYMBOL(filemap_write_and_dispatch_range);
-
-
-int filemap_ordered_write_range(struct address_space *mapping, loff_t start,
-						loff_t end)
-{
-	return filemap_writeback(mapping, start, end, WB_BARRIER_ALL, NULL);
-}
-EXPORT_SYMBOL(filemap_ordered_write_range);
 
 /**
  * filemap_flush - mostly a non-blocking flush
@@ -728,6 +629,12 @@ int filemap_fdatawait_keep_errors(struct address_space *mapping)
 }
 EXPORT_SYMBOL(filemap_fdatawait_keep_errors);
 
+/* Returns true if writeback might be needed or already in progress. */
+static bool mapping_needs_writeback(struct address_space *mapping)
+{
+	return mapping->nrpages;
+}
+
 bool filemap_range_has_writeback(struct address_space *mapping,
 				 loff_t start_byte, loff_t end_byte)
 {
@@ -785,12 +692,6 @@ int filemap_write_and_wait_range(struct address_space *mapping,
 		if (err != -EIO)
 			__filemap_fdatawait_range(mapping, lstart, lend);
 	}
-	/*
-	 * Preserve the consuming error semantics of this mapping-wide API.
-	 * An errseq check against zero would report an old error forever,
-	 * including on journal recovery after a device becomes writable again.
-	 * File-specific fsync callers retain their own errseq cursors.
-	 */
 	err2 = filemap_check_errors(mapping);
 	if (!err)
 		err = err2;
@@ -1749,9 +1650,6 @@ EXPORT_SYMBOL_GPL(folio_end_dropbehind);
  */
 void folio_end_writeback_no_dropbehind(struct folio *folio)
 {
-	/* Submission state survives mapping detach; never infer ownership here. */
-	if (folio_test_dispatch(folio))
-		folio_end_dispatch(folio);
 	VM_BUG_ON_FOLIO(!folio_test_writeback(folio), folio);
 
 	/*
@@ -1797,29 +1695,6 @@ void folio_end_writeback(struct folio *folio)
 	folio_put(folio);
 }
 EXPORT_SYMBOL(folio_end_writeback);
-
-/* UFS */
-void folio_end_dispatch(struct folio *folio)
-{
-	if (!folio_test_dispatch(folio))
-		return;
-	/*
-	 * Writeback does not hold a folio reference of its own, relying
-	 * on truncation to wait for the clearing of PG_writeback.
-	 * But here we must make sure that the folio is not freed and
-	 * reused before the folio_wake().
-	 */
-	folio_get(folio);
-	if (!__folio_end_dispatch(folio)) {
-		dump_stack();
-		BUG();
-	}
-
-	smp_mb__after_atomic();
-	folio_wake_bit(folio, PG_dispatch);
-	folio_put(folio);
-}
-EXPORT_SYMBOL(folio_end_dispatch);
 
 /**
  * __folio_lock - Get a lock on the folio, assuming we need to sleep to get it.

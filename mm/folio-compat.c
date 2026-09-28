@@ -23,26 +23,11 @@ void end_page_writeback(struct page *page)
 }
 EXPORT_SYMBOL(end_page_writeback);
 
-/* UFS */
-void end_page_dispatch(struct page *page)
-{
-	// printk ("[UFS] (%s) page : %lx\n", __func__, page);
-	return folio_end_dispatch(page_folio(page));
-}
-EXPORT_SYMBOL(end_page_dispatch);
-
 void wait_on_page_writeback(struct page *page)
 {
 	return folio_wait_writeback(page_folio(page));
 }
 EXPORT_SYMBOL_GPL(wait_on_page_writeback);
-
-/* UFS */
-void wait_on_page_dispatch(struct page *page)
-{
-	return folio_wait_dispatch(page_folio(page));
-}
-EXPORT_SYMBOL_GPL(wait_on_page_dispatch);
 
 void mark_page_accessed(struct page *page)
 {

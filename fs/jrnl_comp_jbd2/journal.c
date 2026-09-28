@@ -463,6 +463,7 @@ int jrnl_comp_jbd2_journal_write_metadata_buffer(jrnl_comp_transaction_t *transa
 {
 	int do_escape = 0;
 	struct buffer_head *new_bh;
+	struct jrnl_comp_io_context *io;
 	struct folio *new_folio;
 	unsigned int new_offset;
 	struct buffer_head *bh_in = jrnl_comp_jh2bh(jh_in);
@@ -482,6 +483,7 @@ int jrnl_comp_jbd2_journal_write_metadata_buffer(jrnl_comp_transaction_t *transa
 	// J_ASSERT_BH(bh_in, buffer_jbddirty(bh_in));
 
 	new_bh = alloc_buffer_head(GFP_NOFS|__GFP_NOFAIL);
+	io = kzalloc(sizeof(*io), GFP_NOFS | __GFP_NOFAIL);
 
 	/* keep subsequent assertions sane */
 	atomic_set(&new_bh->b_count, 1);
@@ -555,10 +557,11 @@ escape_done:
 	new_bh->b_size = bh_in->b_size;
 	new_bh->b_bdev = journal->j_dev;
 	new_bh->b_blocknr = blocknr;
-	new_bh->b_private = bh_in;
-	new_bh->b_cjfs_io_entry = jh_in->b_jh_entry[ver_tid];
-	J_ASSERT_BH(new_bh, !test_bit(0, &new_bh->b_cjfs_io_entry->b_io_state));
-	set_bit(0, &new_bh->b_cjfs_io_entry->b_io_state);
+	io->source = bh_in;
+	io->entry = jh_in->b_jh_entry[ver_tid];
+	new_bh->b_private = io;
+	J_ASSERT_BH(new_bh, !test_bit(0, &io->entry->b_io_state));
+	set_bit(0, &io->entry->b_io_state);
 	set_buffer_mapped(new_bh);
 	set_buffer_dirty(new_bh);
 
@@ -668,7 +671,7 @@ static int __jrnl_comp_jbd2_journal_force_commit(jrnl_comp_journal_t *journal)
 	int need_to_start = 0, ret = 0;
 
 	read_lock(&journal->j_state_lock);
-	if (journal->j_running_transaction && !current->jrnl_comp_journal_info) {
+	if (journal->j_running_transaction && !jrnl_comp_journal_current_handle()) {
 		transaction = journal->j_running_transaction;
 		if (!tid_geq(journal->j_commit_request, transaction->t_tid))
 			need_to_start = 1;
@@ -725,7 +728,7 @@ int jrnl_comp_jbd2_journal_force_commit(jrnl_comp_journal_t *journal)
 {
 	int ret;
 
-	J_ASSERT(!current->jrnl_comp_journal_info);
+	J_ASSERT(!jrnl_comp_journal_current_handle());
 	ret = __jrnl_comp_jbd2_journal_force_commit(journal);
 	if (ret > 0)
 		ret = 0;

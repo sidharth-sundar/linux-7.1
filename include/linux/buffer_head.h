@@ -35,7 +35,6 @@ enum bh_state_bits {
 	BH_Prio,	/* Buffer should be submitted with REQ_PRIO */
 	BH_Defer_Completion, /* Defer AIO completion to workqueue */
 	BH_Migrate,     /* Buffer is being migrated (norefs) */
-	BH_Dispatch,	/* UFS */
 
 	BH_PrivateStart,/* not a state bit, but the first bit available
 			 * for private allocation by other entities
@@ -58,8 +57,6 @@ typedef void (bh_end_io_t)(struct buffer_head *bh, int uptodate);
  * a folio (via a folio_mapping) and for wrapping bio submission
  * for backward compatibility reasons (e.g. submit_bh).
  */
-struct b_jh_entry;
-
 struct buffer_head {
 	unsigned long b_state;		/* buffer state bitmap (see above) */
 	struct buffer_head *b_this_page;/* circular list of page's buffers */
@@ -82,8 +79,6 @@ struct buffer_head {
 	spinlock_t b_uptodate_lock;	/* Used by the first bh in a page, to
 					 * serialise IO completion of other
 					 * buffers in the page */
-	void *b_tx;
-	struct b_jh_entry *b_cjfs_io_entry;
 };
 
 /*
@@ -141,10 +136,6 @@ BUFFER_FNS(Unwritten, unwritten)
 BUFFER_FNS(Meta, meta)
 BUFFER_FNS(Prio, prio)
 BUFFER_FNS(Defer_Completion, defer_completion)
-
-/* UFS */
-BUFFER_FNS(Dispatch, dispatch)
-TAS_BUFFER_FNS(Dispatch, dispatch)
 
 static __always_inline void set_buffer_uptodate(struct buffer_head *bh)
 {
@@ -249,8 +240,6 @@ int sync_dirty_buffer(struct buffer_head *bh);
 int __sync_dirty_buffer(struct buffer_head *bh, blk_opf_t op_flags);
 void write_dirty_buffer(struct buffer_head *bh, blk_opf_t op_flags);
 void submit_bh(blk_opf_t, struct buffer_head *);
-void __lock_buffer_dispatch(struct buffer_head *bh);
-int dispatch_bio_bh(struct bio *bio);
 void write_boundary_block(struct block_device *bdev,
 			sector_t bblock, unsigned blocksize);
 int bh_uptodate_or_lock(struct buffer_head *bh);
@@ -443,29 +432,6 @@ static inline void lock_buffer(struct buffer_head *bh)
 		__lock_buffer(bh);
 }
 
-/* UFS: Buffer head */
-void __wait_on_buffer_dispatch(struct buffer_head *bh);
-static inline int trylock_buffer_dispatch(struct buffer_head *bh)
-{
-	return !test_and_set_bit_lock(BH_Dispatch, &bh->b_state);
-}
-static inline void lock_buffer_dispatch(struct buffer_head *bh)
-{
-	trylock_buffer_dispatch(bh);
-}
-static inline void wait_on_buffer_dispatch(struct buffer_head *bh)
-{
-	if (buffer_dispatch(bh))
-		__wait_on_buffer_dispatch(bh);
-}
-static inline void wake_up_buffer_dispatch(struct buffer_head *bh)
-{
-	if (!buffer_dispatch(bh))
-		return;
-	clear_bit_unlock(BH_Dispatch, &bh->b_state);
-	smp_mb__after_atomic();
-	wake_up_bit(&bh->b_state, BH_Dispatch);
-}
 static inline void bh_readahead(struct buffer_head *bh, blk_opf_t op_flags)
 {
 	if (!buffer_uptodate(bh) && trylock_buffer(bh)) {

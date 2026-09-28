@@ -66,30 +66,14 @@ inline void touch_buffer(struct buffer_head *bh)
 }
 EXPORT_SYMBOL(touch_buffer);
 
-/* UFS */
-static int sleep_on_buffer(struct wait_bit_key *key, int mode)
-{
-	io_schedule();
-	return 0;
-}
-
 void __lock_buffer(struct buffer_head *bh)
 {
 	wait_on_bit_lock_io(&bh->b_state, BH_Lock, TASK_UNINTERRUPTIBLE);
 }
 EXPORT_SYMBOL(__lock_buffer);
 
-/* UFS */
-void __lock_buffer_dispatch(struct buffer_head *bh)
-{
-	wait_on_bit_lock_action(&bh->b_state, BH_Dispatch,
-			sleep_on_buffer, TASK_UNINTERRUPTIBLE);
-}
-EXPORT_SYMBOL(__lock_buffer_dispatch);
-
 void unlock_buffer(struct buffer_head *bh)
 {
-	wake_up_buffer_dispatch(bh);
 	clear_bit_unlock(BH_Lock, &bh->b_state);
 	smp_mb__after_atomic();
 	wake_up_bit(&bh->b_state, BH_Lock);
@@ -140,13 +124,6 @@ void __wait_on_buffer(struct buffer_head * bh)
 }
 EXPORT_SYMBOL(__wait_on_buffer);
 
-/* UFS */
-void __wait_on_buffer_dispatch(struct buffer_head * bh)
-{
-	wait_on_bit_action(&bh->b_state, BH_Dispatch, sleep_on_buffer, TASK_UNINTERRUPTIBLE);
-}
-EXPORT_SYMBOL(__wait_on_buffer_dispatch);
-
 static void buffer_io_error(struct buffer_head *bh, char *msg)
 {
 	if (!test_bit(BH_Quiet, &bh->b_state))
@@ -194,9 +171,6 @@ void end_buffer_write_sync(struct buffer_head *bh, int uptodate)
 		mark_buffer_write_io_error(bh);
 		clear_buffer_uptodate(bh);
 	}
-
-	/* UFS */
-	wake_up_buffer_dispatch(bh);
 	unlock_buffer(bh);
 	put_bh(bh);
 }
@@ -1164,7 +1138,6 @@ void __brelse(struct buffer_head *bh)
 		put_bh(bh);
 		return;
 	}
-	dump_stack();
 	WARN(1, KERN_ERR "VFS: brelse: Trying to free free buffer\n");
 }
 EXPORT_SYMBOL(__brelse);
@@ -2761,8 +2734,6 @@ static void submit_bh_wbc(blk_opf_t opf, struct buffer_head *bh,
 		wbc_account_cgroup_owner(wbc, bh->b_folio, bh->b_size);
 	}
 
-	if (opf & REQ_ORDERED)
-		lock_buffer_dispatch(bh);
 	blk_crypto_submit_bio(bio);
 }
 
@@ -2771,18 +2742,6 @@ void submit_bh(blk_opf_t opf, struct buffer_head *bh)
 	submit_bh_wbc(opf, bh, WRITE_LIFE_NOT_SET, NULL);
 }
 EXPORT_SYMBOL(submit_bh);
-
-/* UFS */
-int dispatch_bio_bh(struct bio *bio)
-{
-	if ((bio->bi_end_io == end_bio_bh_io_sync) && bio->bi_private) {
-		// struct buffer_head *bh = bio->bi_private;
-
-		wake_up_buffer_dispatch(bio->bi_private);
-		return 1;
-	}
-	return 0;
-}
 
 void write_dirty_buffer(struct buffer_head *bh, blk_opf_t op_flags)
 {

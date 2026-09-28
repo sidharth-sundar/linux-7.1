@@ -213,7 +213,6 @@ struct bio {
 	blk_opf_t		bi_opf;		/* bottom bits REQ_OP, top bits
 						 * req_flags.
 						 */
-	struct epoch		*bi_epoch;
 	unsigned short		bi_flags;	/* BIO_* below */
 	unsigned short		bi_ioprio;
 	enum rw_hint		bi_write_hint;
@@ -408,9 +407,6 @@ enum req_flag_bits {
 	/* for REQ_OP_WRITE_ZEROES: */
 	__REQ_NOUNMAP,		/* do not free blocks when zeroing */
 
-	/* UFS */
-	__REQ_ORDERED,
-	__REQ_BARRIER,
 	__REQ_NR_BITS,		/* stops here */
 };
 
@@ -445,13 +441,6 @@ enum req_flag_bits {
 
 #define REQ_NOMERGE_FLAGS \
 	(REQ_NOMERGE | REQ_PREFLUSH | REQ_FUA)
-
-/* UFS */
-#define REQ_ORDERED 		(1ULL << __REQ_ORDERED)
-#define REQ_BARRIER 		(1ULL << __REQ_BARRIER)
-
-#define WRITE_ORDERED           (WRITE | REQ_SYNC | REQ_NOIDLE | REQ_ORDERED)
-#define WRITE_BARRIER           (WRITE | REQ_SYNC | REQ_NOIDLE | REQ_ORDERED | REQ_BARRIER)
 
 enum stat_group {
 	STAT_READ,

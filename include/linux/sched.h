@@ -1282,8 +1282,6 @@ struct task_struct {
 
 	/* Journalling filesystem info: */
 	void				*journal_info;
-	/* Private journal stack; never alias stock JBD2's current handle. */
-	void				*jrnl_comp_journal_info;
 
 	/* Stacked block device info: */
 	struct bio_list			*bio_list;
@@ -1626,16 +1624,6 @@ struct task_struct {
 	 */
 	struct callback_head		l1d_flush_kill;
 #endif
-	/* UFS */
-	struct epoch *epoch;
-	struct epoch *__epoch;
-	unsigned int barrier_fail;
-	unsigned int epoch_fail;
-	unsigned int tx_id;
-	s64 op_intv[5];
-	ktime_t start;
-	void *tx;
-
 
 #ifdef CONFIG_RV
 	/*
@@ -1662,25 +1650,6 @@ struct task_struct {
 	 */
 	randomized_struct_fields_end
 } __attribute__ ((aligned (64)));
-
-/* UFS */
-struct epoch {
-	struct task_struct *task;
-	struct request_queue *q;
-	/* Serialize closure, failed-before-dispatch retirement and dispatch. */
-	spinlock_t state_lock;
-
-	unsigned int barrier;
-	atomic_t pending;
-	atomic_t dispatch;
-	atomic_t complete;
-	unsigned int error;
-	unsigned int error_flags;
-
-	atomic_t e_count;
-};
-
-
 
 #ifdef CONFIG_SCHED_PROXY_EXEC
 DECLARE_STATIC_KEY_TRUE(__sched_proxy_exec);

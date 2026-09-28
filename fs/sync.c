@@ -187,20 +187,6 @@ int vfs_fsync_range(struct file *file, loff_t start, loff_t end, int datasync)
 }
 EXPORT_SYMBOL(vfs_fsync_range);
 
-int vfs_fbarrier_range(struct file *file, loff_t start, loff_t end, int datasync)
-{
-	struct inode *inode = file->f_mapping->host;
-
-	if (!test_bit(AS_JRNL_COMP, &file->f_mapping->flags))
-		return -EOPNOTSUPP;
-	if (!file->f_op->fbarrier)
-		return -EINVAL;
-	if (!datasync)
-		sync_lazytime(inode);
-	return file->f_op->fbarrier(file, start, end, datasync);
-}
-EXPORT_SYMBOL(vfs_fbarrier_range);
-
 /**
  * vfs_fsync - perform a fsync or fdatasync on a file
  * @file:		file to sync
@@ -215,13 +201,6 @@ int vfs_fsync(struct file *file, int datasync)
 }
 EXPORT_SYMBOL(vfs_fsync);
 
-/* UFS */
-int vfs_fbarrier(struct file *file, int datasync)
-{
-	return vfs_fbarrier_range(file, 0, LLONG_MAX, datasync);
-}
-EXPORT_SYMBOL(vfs_fbarrier);
-
 static int do_fsync(unsigned int fd, int datasync)
 {
 	CLASS(fd, f)(fd);
@@ -232,16 +211,6 @@ static int do_fsync(unsigned int fd, int datasync)
 	return vfs_fsync(fd_file(f), datasync);
 }
 
-/* UFS */
-static int do_fbarrier(unsigned int fd, int datasync)
-{
-	CLASS(fd, f)(fd);
-
-	if (fd_empty(f))
-		return -EBADF;
-	return vfs_fbarrier(fd_file(f), datasync);
-}
-
 SYSCALL_DEFINE1(fsync, unsigned int, fd)
 {
 	return do_fsync(fd, 0);
@@ -250,16 +219,6 @@ SYSCALL_DEFINE1(fsync, unsigned int, fd)
 SYSCALL_DEFINE1(fdatasync, unsigned int, fd)
 {
 	return do_fsync(fd, 1);
-}
-
-SYSCALL_DEFINE1(fbarrier, unsigned int, fd)
-{
-	return do_fbarrier(fd, 0);
-}
-
-SYSCALL_DEFINE1(fdatabarrier, unsigned int, fd)
-{
-	return do_fbarrier(fd, 1);
 }
 
 int sync_file_range(struct file *file, loff_t offset, loff_t nbytes,

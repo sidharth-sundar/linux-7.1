@@ -692,5 +692,4 @@ const struct file_operations jrnl_comp_ext4_dir_operations = {
 	.release	= jrnl_comp_ext4_release_dir,
 	.setlease	= generic_setlease,
 	/* UFS */
-	.fbarrier	= jrnl_comp_ext4_fbarrier_file,
 };

@@ -409,7 +409,6 @@ dispatch_request:
 	 * rq is the selected appropriate request.
 	 */
 	dd->batching++;
-
 	deadline_move_request(dd, per_prio, rq);
 	return dd_start_request(dd, data_dir, rq);
 }

@@ -127,7 +127,6 @@ static int __blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 			break;
 		}
 
-
 		blk_mq_set_rq_budget_token(rq, budget_token);
 
 		/*

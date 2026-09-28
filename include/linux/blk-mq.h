@@ -108,7 +108,6 @@ struct request {
 	struct blk_mq_hw_ctx *mq_hctx;
 
 	blk_opf_t cmd_flags;		/* op and common flags */
-	blk_opf_t cmd_bflags;
 	req_flags_t rq_flags;
 
 	int tag;
@@ -217,13 +216,6 @@ struct request {
 	 */
 	rq_end_io_fn *end_io;
 	void *end_io_data;
-
-	/* for CJFS MVSP */
-	unsigned int tx_id;
-	unsigned int sub_cpu;
-
-	struct list_head jbd2_intr_list;
-	void * jbd2_nvme_queue;
 };
 
 /*
@@ -873,9 +865,6 @@ void blk_mq_start_request(struct request *rq);
 void blk_mq_end_request(struct request *rq, blk_status_t error);
 void __blk_mq_end_request(struct request *rq, blk_status_t error);
 void blk_mq_end_request_batch(struct io_comp_batch *ib);
-
-/* UFS */
-void blk_mq_dispatch_request(struct request *rq);
 
 /*
  * Only need start/end time stamping if we have iostat or

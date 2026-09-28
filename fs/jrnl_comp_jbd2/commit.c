@@ -34,23 +34,26 @@
  */
 static void journal_end_buffer_io_sync(struct buffer_head *bh, int uptodate)
 {
-	struct buffer_head *orig_bh = bh->b_private;
+	struct jrnl_comp_io_context *io = bh->b_private;
+	struct buffer_head *orig_bh = io ? io->source : NULL;
 
 	BUFFER_TRACE(bh, "");
 	if (uptodate)
 		set_buffer_uptodate(bh);
 	else
 		clear_buffer_uptodate(bh);
-	if (bh->b_cjfs_io_entry) {
-		clear_bit_unlock(0, &bh->b_cjfs_io_entry->b_io_state);
+	if (io && io->entry) {
+		clear_bit_unlock(0, &io->entry->b_io_state);
 		smp_mb__after_atomic();
-		wake_up_bit(&bh->b_cjfs_io_entry->b_io_state, 0);
+		wake_up_bit(&io->entry->b_io_state, 0);
 	}
 	if (orig_bh) {
 		clear_bit_unlock(BH_Shadow, &orig_bh->b_state);
 		smp_mb__after_atomic();
 		wake_up_bit(&orig_bh->b_state, BH_Shadow);
 	}
+	bh->b_private = NULL;
+	kfree(io);
 	unlock_buffer(bh);
 }
 
@@ -81,9 +84,8 @@ static void journal_submit_subblock(jrnl_comp_transaction_t *t, struct buffer_he
 	clear_buffer_dirty(bh);
 	set_buffer_uptodate(bh);
 	bh->b_end_io = journal_end_subblock_io;
-	bh->b_tx = t;
 	j->j_subblock_containers++;
-	submit_bh(REQ_OP_WRITE | REQ_SYNC | REQ_ORDERED, bh);
+	submit_bh(REQ_OP_WRITE | REQ_SYNC, bh);
 }
 
 /*
@@ -161,7 +163,6 @@ static int journal_pack_subblocks(jrnl_comp_transaction_t *t, struct list_head *
 			jrnl_comp_jbd2_sb_init((unsigned char *)packed->b_data, packed->b_size,
 				     t->t_tid, gran);
 			packed->b_private = io;
-			packed->b_cjfs_io_entry = NULL;
 			set_buffer_jwrite(packed);
 			set_buffer_dirty(packed);
 			jrnl_comp_jbd2_file_log_bh(log_bufs, packed);
@@ -319,7 +320,7 @@ static int journal_submit_commit_record(jrnl_comp_journal_t *journal,
 		 * if power fails before the flush thread's later device flush.
 		 * Keep standard JRNL_COMP_JBD2 preflush/FUA protection on that boundary.
 		 */
-		write_flags |= REQ_ORDERED | REQ_BARRIER | REQ_PREFLUSH | REQ_FUA;
+		write_flags |= REQ_PREFLUSH | REQ_FUA;
 
 	submit_bh(write_flags, bh);
 	*cbh = bh;
@@ -345,13 +346,13 @@ static int journal_wait_on_commit_record(jrnl_comp_journal_t *journal,
 	return ret;
 }
 
-/* UFS : Wrapping Function of dispatch checking of Journal Commit Record */
-static int journal_wait_on_dispatch_of_commit_record(jrnl_comp_journal_t *journal,
+/* Complete the I/O here; the flush phase still owns and releases the bh. */
+static int journal_wait_on_commit_record_retained(jrnl_comp_journal_t *journal,
 					 struct buffer_head *bh)
 {
-	wait_on_buffer_dispatch(bh);
+	wait_on_buffer(bh);
 
-	return 0;
+	return buffer_uptodate(bh) ? 0 : -EIO;
 }
 
 /* Send all the data buffers related to an inode */
@@ -930,15 +931,14 @@ start_journal_io:
 				set_buffer_uptodate(bh);
 				bh->b_end_io = journal_end_buffer_io_sync;
 				/* UFS */
-				bh->b_tx = bh->b_tx == NULL ? commit_transaction : bh->b_tx;
 				if (commit_transaction->t_buffers != NULL) {
-					submit_bh(REQ_OP_WRITE | REQ_SYNC | REQ_ORDERED, bh);
+					submit_bh(REQ_OP_WRITE | REQ_SYNC, bh);
 				} else if (i == bufs - 1 && commit_transaction->t_buffers == NULL) {
-					submit_bh(REQ_OP_WRITE | REQ_SYNC | REQ_ORDERED | REQ_BARRIER, bh);
+					submit_bh(REQ_OP_WRITE | REQ_SYNC, bh);
 				} else {
-					submit_bh(REQ_OP_WRITE | REQ_SYNC | REQ_ORDERED, bh);
+					submit_bh(REQ_OP_WRITE | REQ_SYNC, bh);
 				}
-				// submit_bh(REQ_OP_WRITE | REQ_SYNC | REQ_ORDERED, bh);
+				// submit_bh(REQ_OP_WRITE | REQ_SYNC, bh);
 			}
 			cond_resched();
 
@@ -1034,8 +1034,7 @@ start_journal_io:
 		BUFFER_TRACE(bh, "dumping temporary bh");
 		__brelse(bh);
 		J_ASSERT_BH(bh, atomic_read(&bh->b_count) == 0);
-		J_ASSERT_BH(bh, !bh->b_cjfs_io_entry ||
-			!test_bit(0, &bh->b_cjfs_io_entry->b_io_state));
+		J_ASSERT_BH(bh, !bh->b_private);
 		free_buffer_head(bh);
 
 		/* We also have to refile the corresponding shadowed buffer */
@@ -1916,14 +1915,13 @@ start_journal_io:
 				bh->b_end_io = journal_end_buffer_io_sync;
 				// submit_bh(REQ_OP_WRITE | REQ_SYNC, bh);
 				/* UFS */
-				bh->b_tx = bh->b_tx == NULL ? commit_transaction : bh->b_tx;
 				if (commit_transaction->t_buffers != NULL) {
-					submit_bh(REQ_OP_WRITE | REQ_SYNC | REQ_ORDERED, bh);
+					submit_bh(REQ_OP_WRITE | REQ_SYNC, bh);
 				} else if (i == bufs - 1
 						&& commit_transaction->t_buffers == NULL) {
-					submit_bh(REQ_OP_WRITE | REQ_SYNC | REQ_ORDERED | REQ_BARRIER, bh);
+					submit_bh(REQ_OP_WRITE | REQ_SYNC, bh);
 				} else {
-					submit_bh(REQ_OP_WRITE | REQ_SYNC | REQ_ORDERED, bh);
+					submit_bh(REQ_OP_WRITE | REQ_SYNC, bh);
 				}
 			}
 			cond_resched();
@@ -2008,7 +2006,9 @@ start_journal_io:
 						    struct buffer_head,
 						    b_assoc_buffers);
 		ji_wait(journal, commit_transaction->t_tid, JI_DISPATCH, bh,
-			wait_on_buffer_dispatch(bh));
+			wait_on_buffer(bh));
+		if (unlikely(!buffer_uptodate(bh)))
+			jrnl_comp_jbd2_journal_abort(journal, -EIO);
 
 		jrnl_comp_jbd2_unfile_log_bh(bh);
 		jrnl_comp_jbd2_file_log_bh(&commit_transaction->t_io_bufs, bh);
@@ -2019,7 +2019,9 @@ start_journal_io:
 						    struct buffer_head,
 						    b_assoc_buffers);
 		ji_wait(journal, commit_transaction->t_tid, JI_DISPATCH, bh,
-			wait_on_buffer_dispatch(bh));
+			wait_on_buffer(bh));
+		if (unlikely(!buffer_uptodate(bh)))
+			jrnl_comp_jbd2_journal_abort(journal, -EIO);
 		jrnl_comp_jbd2_unfile_log_bh(bh);
 		jrnl_comp_jbd2_file_log_bh(&commit_transaction->t_log_bufs, bh);
 	}
@@ -2034,8 +2036,10 @@ start_journal_io:
 
 	/* UFS */
 	if (commit_transaction->t_cbh)
-		err = journal_wait_on_dispatch_of_commit_record(journal,
+		err = journal_wait_on_commit_record_retained(journal,
 				commit_transaction->t_cbh);
+	if (err)
+		jrnl_comp_jbd2_journal_abort(journal, err);
 
 
 
@@ -2188,8 +2192,7 @@ static void jrnl_comp_jbd2_finish_flushed_transaction(jrnl_comp_journal_t *journ
 		BUFFER_TRACE(bh, "dumping temporary bh");
 		__brelse(bh);
 		J_ASSERT_BH(bh, atomic_read(&bh->b_count) == 0);
-		J_ASSERT_BH(bh, !bh->b_cjfs_io_entry ||
-			!test_bit(0, &bh->b_cjfs_io_entry->b_io_state));
+		J_ASSERT_BH(bh, !bh->b_private);
 		free_buffer_head(bh);
 
 		/* We also have to refile the corresponding shadowed buffer */

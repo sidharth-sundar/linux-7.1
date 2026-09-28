@@ -70,7 +70,7 @@ static unsigned int wv_phase(struct jrnl_comp_jbd2_workvolume *w)
 {
  return READ_ONCE(w->phase);
 }
-static void wv_bio(void *data, struct bio *bio)
+static void __maybe_unused wv_bio(void *data, struct bio *bio)
 {
  struct jrnl_comp_jbd2_workvolume *w = data;
  sector_t start, end, lo, hi;
@@ -114,7 +114,7 @@ static void wv_bio(void *data, struct bio *bio)
  wv_add(w, phase, WV_preflush_bios, !!(bio->bi_opf & REQ_PREFLUSH));
  wv_add(w, phase, WV_fua_bios, !!(bio->bi_opf & REQ_FUA));
 }
-static void wv_complete(void *data, struct request_queue *q, struct bio *bio)
+static void __maybe_unused wv_complete(void *data, struct request_queue *q, struct bio *bio)
 {
  struct jrnl_comp_jbd2_workvolume *w = data;
  /* Error notification only, not a submitted/completed byte reconciliation. */
@@ -149,7 +149,7 @@ static void wv_finish_ranges(struct jrnl_comp_jbd2_workvolume *w, jrnl_comp_tid_
 out:
  spin_unlock_irqrestore(&w->lock, flags);
 }
-static void wv_event(void *data, dev_t dev, jrnl_comp_tid_t tid, u64 generation,
+static void __maybe_unused wv_event(void *data, dev_t dev, jrnl_comp_tid_t tid, u64 generation,
                      const char *event, u64 value)
 {
  struct jrnl_comp_jbd2_workvolume *w = data;
@@ -336,33 +336,15 @@ fail:
 }
 static void wv_unregister(struct jrnl_comp_jbd2_workvolume *w)
 {
- if (!w->probes)
-  return;
- unregister_trace_block_bio_queue(wv_bio, w);
- unregister_trace_block_bio_complete(wv_complete, w);
- unregister_trace_jrnl_comp_cjfs_event(wv_event, w);
- tracepoint_synchronize_unregister();
- w->probes = false;
+ WARN_ON_ONCE(w->probes);
 }
 static int wv_register(struct jrnl_comp_jbd2_workvolume *w)
 {
- int err = register_trace_block_bio_queue(wv_bio, w);
- if (err)
-  return err;
- err = register_trace_block_bio_complete(wv_complete, w);
- if (err)
-  goto queue;
- err = register_trace_jrnl_comp_cjfs_event(wv_event, w);
- if (err)
-  goto complete;
- w->probes = true;
- return 0;
-complete:
- unregister_trace_block_bio_complete(wv_complete, w);
-queue:
- unregister_trace_block_bio_queue(wv_bio, w);
- tracepoint_synchronize_unregister();
- return err;
+ /* Stock kernels do not export block_bio_queue to modules. Do not add a
+  * shared-core export merely for optional preliminary instrumentation.
+  * Reject collection rather than silently report missing I/O as zero.
+  */
+ return -EOPNOTSUPP;
 }
 static void wv_barrier_end(jrnl_comp_journal_t *j)
 {

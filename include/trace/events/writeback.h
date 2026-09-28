@@ -100,13 +100,6 @@ DEFINE_EVENT(writeback_folio_template, folio_wait_writeback,
 	TP_ARGS(folio, mapping)
 );
 
-DEFINE_EVENT(writeback_folio_template, folio_wait_dispatch,
-
-	TP_PROTO(struct folio *folio, struct address_space *mapping),
-
-	TP_ARGS(folio, mapping)
-);
-
 DECLARE_EVENT_CLASS(writeback_dirty_inode_template,
 
 	TP_PROTO(struct inode *inode, int flags),

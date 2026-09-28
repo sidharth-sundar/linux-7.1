@@ -2498,7 +2498,7 @@ struct folio *writeback_iter(struct address_space *mapping,
 		 * TOWRITE tag can be cleared only by the process clearing the
 		 * DIRTY tag (and submitting the page for I/O).
 		 */
-		if (wbc->sync_mode != WB_SYNC_NONE || wbc->tagged_writepages)
+		if (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages)
 			tag_pages_for_writeback(mapping, wbc->index,
 					wbc_end(wbc));
 	} else {
@@ -2517,7 +2517,7 @@ struct folio *writeback_iter(struct address_space *mapping,
 		 * For background writeback we exit as soon as we run past
 		 * wbc->nr_to_write or encounter the first error.
 		 */
-		if (wbc->sync_mode != WB_SYNC_NONE) {
+		if (wbc->sync_mode == WB_SYNC_ALL) {
 			if (*error && !wbc->saved_err)
 				wbc->saved_err = *error;
 		} else {
@@ -2572,7 +2572,7 @@ int do_writepages(struct address_space *mapping, struct writeback_control *wbc)
 		else
 			/* deal with chardevs and other special files */
 			ret = 0;
-		if (ret != -ENOMEM || wbc->sync_mode == WB_SYNC_NONE)
+		if (ret != -ENOMEM || wbc->sync_mode != WB_SYNC_ALL)
 			break;
 
 		/*
@@ -2986,12 +2986,6 @@ bool __folio_end_writeback(struct folio *folio)
 	return ret;
 }
 
-bool __folio_end_dispatch(struct folio *folio)
-{
-	folio_clear_dispatch(folio);
-	return true;
-}
-
 void __folio_start_writeback(struct folio *folio, bool keep_write)
 {
 	long nr = folio_nr_pages(folio);
@@ -3010,8 +3004,6 @@ void __folio_start_writeback(struct folio *folio, bool keep_write)
 
 		xas_lock_irqsave(&xas, flags);
 		xas_load(&xas);
-		if (mapping && test_bit(AS_JRNL_COMP, &mapping->flags))
-			folio_set_dispatch(folio);
 		folio_test_set_writeback(folio);
 
 		on_wblist = mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK);
@@ -3036,8 +3028,6 @@ void __folio_start_writeback(struct folio *folio, bool keep_write)
 			xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);
 		xas_unlock_irqrestore(&xas, flags);
 	} else {
-		if (mapping && test_bit(AS_JRNL_COMP, &mapping->flags))
-			folio_set_dispatch(folio);
 		folio_test_set_writeback(folio);
 	}
 
@@ -3073,16 +3063,6 @@ void folio_wait_writeback(struct folio *folio)
 	}
 }
 EXPORT_SYMBOL_GPL(folio_wait_writeback);
-
-/* UFS */
-void folio_wait_dispatch(struct folio *folio)
-{
-	while (folio_test_dispatch(folio)) {
-		trace_folio_wait_dispatch(folio, folio_mapping(folio));
-		folio_wait_bit(folio, PG_dispatch);
-	}
-}
-EXPORT_SYMBOL_GPL(folio_wait_dispatch);
 
 /**
  * folio_wait_writeback_killable - Wait for a folio to finish writeback.

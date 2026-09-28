@@ -637,11 +637,6 @@ struct request_queue {
 	bool			mq_freeze_queue_dying;
 #endif
 	wait_queue_head_t	mq_freeze_wq;
-
-	/* UFS */
-	mempool_t *epoch_pool;
-	mempool_t *epoch_link_pool;
-
 	/*
 	 * Protect concurrent access to q_usage_counter by
 	 * percpu_ref_kill() and percpu_ref_reinit().
@@ -1232,57 +1227,7 @@ static inline void blk_plug_invalidate_ts(struct task_struct *tsk)
 }
 
 int blkdev_issue_flush(struct block_device *bdev);
-int blkdev_issue_barrier(struct block_device *bdev);
 long nr_blockdev_pages(void);
-
-/* UFS */
-static inline void get_epoch(struct epoch *epoch)
-{
-	atomic_inc(&epoch->e_count);
-}
-static inline void put_epoch(struct epoch *epoch)
-{
-	if (atomic_dec_and_test(&epoch->e_count)) {
-		struct request_queue *q = epoch->q;
-
-		mempool_free(epoch, q->epoch_pool);
-		/* The pool cannot disappear while an epoch still references it. */
-		blk_put_queue(q);
-	}
-}
-
-extern void blk_issue_barrier_plug(void);
-extern void blk_request_dispatched(struct request *req);
-extern int blk_jrnl_comp_init_epoch_pool(struct request_queue *q);
-extern int blk_start_epoch(struct request_queue *q);
-extern void blk_finish_epoch(void);
-extern void blk_abort_epoch(void);
-
-/* Caller owns an epoch reference and exactly one pending dispatch token. */
-static inline bool blk_epoch_retire_pending(struct epoch *epoch, bool dispatched)
-{
-	unsigned long flags;
-	bool barrier = false;
-
-	spin_lock_irqsave(&epoch->state_lock, flags);
-	if (!dispatched) {
-		epoch->error = EIO;
-		epoch->barrier = 0;
-	}
-	if (WARN_ON_ONCE(atomic_read(&epoch->pending) <= 0)) {
-		epoch->error = EIO;
-		epoch->barrier = 0;
-	} else {
-		int remaining = atomic_dec_return(&epoch->pending);
-
-		if (dispatched)
-			atomic_inc(&epoch->dispatch);
-		barrier = dispatched && !remaining && epoch->barrier && !epoch->error;
-	}
-	spin_unlock_irqrestore(&epoch->state_lock, flags);
-	return barrier;
-}
-
 #else /* CONFIG_BLOCK */
 struct blk_plug {
 };

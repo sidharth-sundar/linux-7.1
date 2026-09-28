@@ -969,10 +969,6 @@ void __noreturn do_exit(long code)
 	exit_sem(tsk);
 	exit_shm(tsk);
 	exit_files(tsk);
-#ifdef CONFIG_BLOCK
-	/* Last-resort cleanup only; experimental submitters must close their scopes. */
-	blk_abort_epoch();
-#endif
 	exit_fs(tsk);
 	if (group_dead)
 		disassociate_ctty(1);

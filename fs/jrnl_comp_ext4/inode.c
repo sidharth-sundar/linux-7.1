@@ -3000,10 +3000,6 @@ retry:
 			break;
 	}
 unplug:
-	/* UFS */
-	if (wbc->sync_mode == WB_BARRIER_ALL)
-		blk_issue_barrier_plug();
-
 	blk_finish_plug(&plug);
 	if (!ret && !cycled && wbc->nr_to_write > 0) {
 		cycled = 1;

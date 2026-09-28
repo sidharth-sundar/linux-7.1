@@ -32,7 +32,7 @@ int jrnl_comp_ext4_inode_journal_mode(struct inode *inode)
 /* Just increment the non-pointer handle value */
 static jrnl_comp_handle_t *jrnl_comp_ext4_get_nojournal(void)
 {
-	jrnl_comp_handle_t *handle = current->jrnl_comp_journal_info;
+	jrnl_comp_handle_t *handle = jrnl_comp_journal_current_handle();
 	unsigned long ref_cnt = (unsigned long)handle;
 
 	BUG_ON(ref_cnt >= JRNL_COMP_EXT4_NOJOURNAL_MAX_REF_COUNT);
@@ -40,7 +40,7 @@ static jrnl_comp_handle_t *jrnl_comp_ext4_get_nojournal(void)
 	ref_cnt++;
 	handle = (jrnl_comp_handle_t *)ref_cnt;
 
-	current->jrnl_comp_journal_info = handle;
+	jrnl_comp_journal_set_current_handle(handle);
 	return handle;
 }
 
@@ -55,7 +55,7 @@ static void jrnl_comp_ext4_put_nojournal(jrnl_comp_handle_t *handle)
 	ref_cnt--;
 	handle = (jrnl_comp_handle_t *)ref_cnt;
 
-	current->jrnl_comp_journal_info = handle;
+	jrnl_comp_journal_set_current_handle(handle);
 }
 
 /*

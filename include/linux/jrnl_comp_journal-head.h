@@ -24,6 +24,15 @@ typedef struct jrnl_comp_transaction_s	jrnl_comp_transaction_t;	/* Compound tran
 
 struct buffer_head;
 
+/* Temporary journal I/O only; never attached to stock filesystem buffers.
+ * Allocated before submission, released by journal completion before unlock.
+ * The transaction shadow list retains the source and version until completion.
+ */
+struct jrnl_comp_io_context {
+	struct buffer_head *source;
+	struct b_jh_entry *entry;
+};
+
 struct jrnl_comp_journal_head {
 	/*
 	 * Points back to our buffer_head. [jrnl_comp_jbd_lock_bh_journal_head()]

@@ -383,7 +383,6 @@ void blk_rq_init(struct request_queue *q, struct request *rq)
 	rq->tag = BLK_MQ_NO_TAG;
 	rq->internal_tag = BLK_MQ_NO_TAG;
 	rq->start_time_ns = blk_time_get_ns();
-	rq->tx_id = 0;
 	blk_crypto_rq_set_defaults(rq);
 }
 EXPORT_SYMBOL(blk_rq_init);
@@ -420,8 +419,6 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
 	rq->mq_ctx = ctx;
 	rq->mq_hctx = hctx;
 	rq->cmd_flags = data->cmd_flags;
-	/* UFS */
-	rq->cmd_bflags = 0;
 
 	if (data->flags & BLK_MQ_REQ_PM)
 		data->rq_flags |= RQF_PM;
@@ -459,9 +456,6 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
 		if (e->type->ops.prepare_request)
 			e->type->ops.prepare_request(rq);
 	}
-
-	/* UFS */
-	rq->tx_id = (data->cmd_flags & REQ_ORDERED) ? current->tx_id : 0;
 
 	return rq;
 }
@@ -1399,14 +1393,6 @@ void blk_mq_start_request(struct request *rq)
 }
 EXPORT_SYMBOL(blk_mq_start_request);
 
-/* UFS */
-void blk_mq_dispatch_request(struct request *rq)
-{
-	if (rq->cmd_bflags & REQ_ORDERED)
-		trace_block_rq_dispatch(rq);
-}
-EXPORT_SYMBOL(blk_mq_dispatch_request);
-
 /*
  * Allow 2x BLK_MAX_REQUEST_COUNT requests on plug queue for multiple
  * queues. This is important for md arrays to benefit from merging
@@ -1566,7 +1552,6 @@ void blk_mq_requeue_request(struct request *rq, bool kick_requeue_list)
 	unsigned long flags;
 
 	__blk_mq_requeue_request(rq);
-
 
 	/* this request will be re-inserted to io scheduler queue */
 	blk_mq_sched_requeue_request(rq);
@@ -2706,10 +2691,6 @@ static void blk_mq_bio_to_request(struct request *rq, struct bio *bio,
 		rq->cmd_flags |= REQ_FAILFAST_MASK;
 
 	rq->bio = rq->biotail = bio;
-	/* UFS */
-	/* Cached requests must not retain a previous submission's ownership. */
-	rq->cmd_bflags = bio->bi_opf & (REQ_ORDERED | REQ_BARRIER);
-
 	rq->__sector = bio->bi_iter.bi_sector;
 	rq->__data_len = bio->bi_iter.bi_size;
 	rq->phys_gap_bit = bio->bi_bvec_gap_bit;
@@ -3127,84 +3108,6 @@ static bool bio_unaligned(const struct bio *bio, struct request_queue *q)
 	return false;
 }
 
-int blk_start_epoch(struct request_queue *q)
-{
-	struct epoch *epoch = current->__epoch;
-	int err;
-
-	if (epoch) {
-		/* A caller may not accidentally join another queue's epoch. */
-		return -EBUSY;
-	}
-	if (!blk_get_queue(q))
-		return -ENODEV;
-	err = blk_jrnl_comp_init_epoch_pool(q);
-	if (err) {
-		blk_put_queue(q);
-		return err;
-	}
-	epoch = mempool_alloc(q->epoch_pool, GFP_NOFS);
-	if (!epoch) {
-		blk_put_queue(q);
-		return -ENOMEM;
-	}
-
-	memset(epoch, 0, sizeof(struct epoch));
-	spin_lock_init(&epoch->state_lock);
-	epoch->task = current;
-	epoch->q = q;
-
-	epoch->barrier = 0;
-	atomic_set(&epoch->pending, 0);
-	atomic_set(&epoch->dispatch, 0);
-	atomic_set(&epoch->complete, 0);
-	epoch->error = 0;
-	epoch->error_flags = 0;
-
-	get_epoch(epoch);
-
-	current->__epoch = epoch;
-	return 0;
-}
-EXPORT_SYMBOL(blk_start_epoch);
-
-void blk_finish_epoch(void)
-{
-	struct epoch *epoch = xchg(&current->__epoch, NULL);
-	unsigned long flags;
-	if (!epoch) {
-		printk(KERN_ERR "UFS: %s: unstarted epoch!\n", __func__);
-		return;
-	}
-	spin_lock_irqsave(&epoch->state_lock, flags);
-	if (atomic_read(&epoch->pending) == 0 || epoch->error) {
-		current->barrier_fail = 1;
-	}
-	else
-		epoch->barrier = 1;
-	spin_unlock_irqrestore(&epoch->state_lock, flags);
-	put_epoch(epoch);
-}
-EXPORT_SYMBOL(blk_finish_epoch);
-
-/* An abandoned scope must never publish an ordering-success marker. */
-void blk_abort_epoch(void)
-{
-	struct epoch *epoch = xchg(&current->__epoch, NULL);
-	unsigned long flags;
-
-	if (!epoch)
-		return;
-	spin_lock_irqsave(&epoch->state_lock, flags);
-	epoch->error = ECANCELED;
-	epoch->barrier = 0;
-	spin_unlock_irqrestore(&epoch->state_lock, flags);
-	current->barrier_fail = 1;
-	put_epoch(epoch);
-}
-EXPORT_SYMBOL(blk_abort_epoch);
-
-
 /**
  * blk_mq_submit_bio - Create and send a request to block device.
  * @bio: Bio pointer.
@@ -3228,7 +3131,6 @@ void blk_mq_submit_bio(struct bio *bio)
 	unsigned int nr_segs;
 	struct request *rq;
 	blk_status_t ret;
-	struct bio *parent = bio; /* UFS */
 
 	/*
 	 * If the plug has a cached request for this queue, try to use it.
@@ -3247,7 +3149,6 @@ void blk_mq_submit_bio(struct bio *bio)
 			blk_queue_exit(q);
 		goto new_request;
 	}
-
 
 	/*
 	 * The cached request already holds a q_usage_counter reference and we
@@ -3281,37 +3182,6 @@ void blk_mq_submit_bio(struct bio *bio)
 	integrity_action = bio_integrity_action(bio);
 	if (integrity_action)
 		bio_integrity_prep(bio, integrity_action);
-
-	/* UFS */
-	if (bio->bi_opf & REQ_ORDERED) {
-		if (bio->bi_opf & REQ_NOWAIT) {
-			bio_wouldblock_error(bio);
-			goto queue_exit;
-		}
-		if (current->__epoch && current->__epoch->q != q) {
-			/* Fail closed rather than move another device's epoch boundary. */
-			current->barrier_fail = 1;
-			bio_io_error(bio);
-			goto queue_exit;
-		}
-		if (!current->__epoch) {
-			if (blk_start_epoch(q)) {
-				current->barrier_fail = 1;
-				bio_io_error(bio);
-				goto queue_exit;
-			}
-		}
-
-		get_epoch(current->__epoch);
-		bio->bi_epoch = current->__epoch;
-		atomic_inc(&bio->bi_epoch->pending);
-
-		if (bio->bi_opf & REQ_BARRIER
-			&& ((bio->bi_end_io == bio_chain_endio && bio != parent)
-			     || (!bio->bi_iter.bi_idx && bio == parent))) {
-			blk_finish_epoch();
-		}
-	}
 
 	blk_mq_bio_issue_init(q, bio);
 	if (blk_mq_attempt_bio_merge(q, bio, nr_segs))

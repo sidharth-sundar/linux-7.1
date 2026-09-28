@@ -5508,6 +5508,18 @@ static int __jrnl_comp_ext4_fill_super(struct fs_context *fc, struct super_block
 			  jrnl_comp_ext4_has_feature_orphan_present(sb) ||
 			  jrnl_comp_ext4_has_feature_journal_needs_recovery(sb));
 
+	/* Initial stock-I/O profile. Reject before recovery or MMP writes. */
+	if (!jrnl_comp_ext4_has_feature_journal(sb) || test_opt(sb, NOLOAD) ||
+	    !test_opt(sb, BARRIER) || test_opt(sb, JOURNAL_ASYNC_COMMIT) ||
+	    test_opt2(sb, JOURNAL_FAST_COMMIT) ||
+	    jrnl_comp_ext4_has_feature_fast_commit(sb) ||
+	    ctx->journal_devnum || le32_to_cpu(es->s_journal_dev)) {
+		jrnl_comp_ext4_msg(sb, KERN_ERR,
+			"stock-I/O profile requires internal journal, barriers, no fast/async commit");
+		err = -EOPNOTSUPP;
+		goto failed_mount3a;
+	}
+
 	if (jrnl_comp_ext4_has_feature_mmp(sb) && !sb_rdonly(sb)) {
 		err = jrnl_comp_ext4_multi_mount_protect(sb, le64_to_cpu(es->s_mmp_block));
 		if (err)
@@ -6127,6 +6139,9 @@ static int jrnl_comp_ext4_load_journal(struct super_block *sb,
 
 	if (WARN_ON_ONCE(!jrnl_comp_ext4_has_feature_journal(sb)))
 		return -EFSCORRUPTED;
+	/* Never open an external device through the experimental journal. */
+	if (!journal_inum || journal_devnum || le32_to_cpu(es->s_journal_dev))
+		return -EOPNOTSUPP;
 
 	if (journal_devnum &&
 	    journal_devnum != le32_to_cpu(es->s_journal_dev)) {
@@ -6153,6 +6168,14 @@ static int jrnl_comp_ext4_load_journal(struct super_block *sb,
 	}
 
 	journal_dev_ro = bdev_read_only(journal->j_dev);
+	/* Check on-disk journal features before wipe or recovery can write. */
+	if (journal->j_dev != sb->s_bdev ||
+	    jrnl_comp_jbd2_has_feature_async_commit(journal) ||
+	    jrnl_comp_jbd2_has_feature_fast_commit(journal) ||
+	    jrnl_comp_jbd2_has_feature_subblock(journal)) {
+		err = -EOPNOTSUPP;
+		goto err_out;
+	}
 	really_read_only = bdev_read_only(sb->s_bdev) | journal_dev_ro;
 
 	if (journal_dev_ro && !sb_rdonly(sb)) {
@@ -6616,6 +6639,20 @@ static int __jrnl_comp_ext4_remount(struct fs_context *fc, struct super_block *s
 				     ctx->vals_s_mount_opt2;
 
 		if ((opts & JRNL_COMP_EXT4_MOUNT_DATA_FLAGS) != JRNL_COMP_EXT4_MOUNT_ORDERED_DATA ||
+		    (opts2 & JRNL_COMP_EXT4_MOUNT2_JOURNAL_FAST_COMMIT))
+			return -EOPNOTSUPP;
+	}
+
+	/* Reject unsupported remount changes before applying any options. */
+	{
+		unsigned int opts = (sbi->s_mount_opt & ~ctx->mask_s_mount_opt) |
+				    ctx->vals_s_mount_opt;
+		unsigned int opts2 = (sbi->s_mount_opt2 & ~ctx->mask_s_mount_opt2) |
+				     ctx->vals_s_mount_opt2;
+
+		if (!(opts & JRNL_COMP_EXT4_MOUNT_BARRIER) ||
+		    (opts & (JRNL_COMP_EXT4_MOUNT_JOURNAL_ASYNC_COMMIT |
+			     JRNL_COMP_EXT4_MOUNT_NOLOAD)) ||
 		    (opts2 & JRNL_COMP_EXT4_MOUNT2_JOURNAL_FAST_COMMIT))
 			return -EOPNOTSUPP;
 	}
@@ -7556,7 +7593,7 @@ static struct file_system_type jrnl_comp_ext4_fs_type = {
 	.init_fs_context	= jrnl_comp_ext4_init_fs_context,
 	.parameters		= jrnl_comp_ext4_param_specs,
 	.kill_sb		= jrnl_comp_ext4_kill_sb,
-	.fs_flags		= FS_JRNL_COMP | FS_REQUIRES_DEV | FS_ALLOW_IDMAP | FS_MGTIME |
+	.fs_flags		= FS_REQUIRES_DEV | FS_ALLOW_IDMAP | FS_MGTIME |
 				  FS_LBS,
 };
 MODULE_ALIAS_FS("jrnl-comp-ext4");

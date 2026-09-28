@@ -25,8 +25,6 @@ enum blktrace_cat {
 	BLK_TC_DISCARD	= 1 << 13,	/* discard requests */
 	BLK_TC_DRV_DATA	= 1 << 14,	/* binary per-driver data */
 	BLK_TC_FUA	= 1 << 15,	/* fua requests */
-	BLK_TC_ORDERED  = 1ull << 23, 	/* UFS */
-	BLK_TC_BARRIER  = 1ull << 24,	/* UFS */
 
 	BLK_TC_END_V1	= 1 << 15,	/* we've run out of bits! */
 
@@ -39,7 +37,7 @@ enum blktrace_cat {
 
 	BLK_TC_WRITE_ZEROES	= 1ull << 22,	/* write-zeroes */
 
-	BLK_TC_END_V2		= 1ull << 24,
+	BLK_TC_END_V2		= 1ull << 22,
 };
 
 #define BLK_TC_SHIFT		(16)

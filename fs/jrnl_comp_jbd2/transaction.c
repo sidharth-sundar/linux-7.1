@@ -464,7 +464,7 @@ repeat:
 		  atomic_read(&transaction->t_outstanding_credits),
 		  jrnl_comp_jbd2_log_space_left(journal));
 	read_unlock(&journal->j_state_lock);
-	current->jrnl_comp_journal_info = handle;
+	jrnl_comp_journal_set_current_handle(handle);
 
 	rwsem_acquire_read(&journal->j_trans_commit_map, 0, 1, _THIS_IP_);
 	jrnl_comp_jbd2_journal_free_transaction(new_transaction);
@@ -648,7 +648,7 @@ int jrnl_comp_jbd2_journal_start_reserved(jrnl_comp_handle_t *handle, unsigned i
 	 * Usefulness of mixing of reserved and unreserved handles is
 	 * questionable. So far nobody seems to need it so just error out.
 	 */
-	if (WARN_ON(current->jrnl_comp_journal_info)) {
+	if (WARN_ON(jrnl_comp_journal_current_handle())) {
 		jrnl_comp_jbd2_journal_free_reserved(handle);
 		return ret;
 	}
@@ -795,7 +795,7 @@ static void stop_this_handle(jrnl_comp_handle_t *handle)
 
 	J_ASSERT(jrnl_comp_journal_current_handle() == handle);
 	J_ASSERT(atomic_read(&transaction->t_updates) > 0);
-	current->jrnl_comp_journal_info = NULL;
+	jrnl_comp_journal_set_current_handle(NULL);
 	/*
 	 * Subtract necessary revoke descriptor blocks from handle credits. We
 	 * take care to account only for revoke descriptor blocks the

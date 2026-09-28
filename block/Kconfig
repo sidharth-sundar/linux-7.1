@@ -223,12 +223,4 @@ config BLK_MQ_STACKING
 
 source "block/Kconfig.iosched"
 
-config JRNL_COMP_EPOCH_TEST
-	tristate "Journal comparison epoch state tests"
-	depends on KUNIT
-	default n
-	help
-	  Test dispatch-debt retirement and failure suppression without devices.
-	  This does not validate hardware ordering or the full BIO lifecycle.
-
 endif # BLOCK
