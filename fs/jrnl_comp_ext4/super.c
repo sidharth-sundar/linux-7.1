@@ -2039,12 +2039,19 @@ static void jrnl_comp_ext4_fc_free(struct fs_context *fc)
 	kfree(ctx);
 }
 
+/* Default closed. Explicit module-load opt-in permits disposable-VM validation
+ * after stock shared-source and linked-symbol audits; not deployment approval.
+ */
+static bool experimental_mounts;
+module_param(experimental_mounts, bool, 0400);
+MODULE_PARM_DESC(experimental_mounts, "Allow explicitly requested experimental mounts (default off)");
+
 int jrnl_comp_ext4_init_fs_context(struct fs_context *fc)
 {
-	/* Remove only after full shared-core isolation review. */
-	return -EOPNOTSUPP;
-
 	struct jrnl_comp_ext4_fs_context *ctx;
+
+	if (!experimental_mounts)
+		return -EOPNOTSUPP;
 
 	ctx = kzalloc_obj(struct jrnl_comp_ext4_fs_context);
 	if (!ctx)
