@@ -1467,9 +1467,6 @@ static blk_status_t sd_setup_read_write_cmnd(struct scsi_cmnd *cmd)
 					 protect | fua, dld);
 	} else if ((nr_blocks > 0xff) || (lba > 0x1fffff) ||
 		   sdp->use_10_for_rw || protect || rq->bio->bi_write_hint) {
-		/* UFS */
-		if (rq->cmd_bflags & REQ_BARRIER)
-				cmd->cmnd[1] |= 0x4;
 		ret = sd_setup_rw10_cmnd(cmd, write, lba, nr_blocks,
 					 protect | fua);
 	} else {

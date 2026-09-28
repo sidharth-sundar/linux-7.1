@@ -1766,8 +1766,13 @@ again:
 
 	if (bio->bi_epoch) {
 		struct epoch *epoch = xchg(&bio->bi_epoch, NULL);
-		if (epoch)
+		if (epoch) {
+			/* No dispatch acknowledgement: retire debt, never signal a barrier. */
+			blk_epoch_retire_pending(epoch, false);
+			if (!bio->bi_status)
+				bio->bi_status = BLK_STS_IOERR;
 			put_epoch(epoch);
+		}
 	}
 	blk_zone_bio_endio(bio);
 

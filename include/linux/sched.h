@@ -1282,6 +1282,8 @@ struct task_struct {
 
 	/* Journalling filesystem info: */
 	void				*journal_info;
+	/* Private journal stack; never alias stock JBD2's current handle. */
+	void				*jrnl_comp_journal_info;
 
 	/* Stacked block device info: */
 	struct bio_list			*bio_list;
@@ -1665,6 +1667,8 @@ struct task_struct {
 struct epoch {
 	struct task_struct *task;
 	struct request_queue *q;
+	/* Serialize closure, failed-before-dispatch retirement and dispatch. */
+	spinlock_t state_lock;
 
 	unsigned int barrier;
 	atomic_t pending;

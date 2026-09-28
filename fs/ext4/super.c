@@ -523,8 +523,6 @@ static bool ext4_journalled_writepage_needs_redirty(struct jbd2_inode *jinode,
 	struct journal_head *jh;
 	transaction_t *trans = READ_ONCE(jinode->i_transaction);
 
-	int ver_tid = jbd2_cjfs_slot(trans);
-
 	bh = head = folio_buffers(folio);
 	do {
 		/*
@@ -542,8 +540,8 @@ static bool ext4_journalled_writepage_needs_redirty(struct jbd2_inode *jinode,
 		 */
 		jh = bh2jh(bh);
 		if (buffer_dirty(bh) ||
-		    (jh && (jh->b_jh_entry[ver_tid]->b_transaction != trans ||
-			    jh->b_jh_entry[ver_tid]->b_next_transaction)))
+		    (jh && (jh->b_transaction != trans ||
+			    jh->b_next_transaction)))
 			return true;
 	} while ((bh = bh->b_this_page) != head);
 
@@ -1712,7 +1710,6 @@ enum {
 	Opt_max_dir_size_kb, Opt_nojournal_checksum, Opt_nombcache,
 	Opt_no_prefetch_block_bitmaps, Opt_mb_optimize_scan,
 	Opt_errors, Opt_data, Opt_data_err, Opt_jqfmt, Opt_dax_type,
-	Opt_journal_subblock,
 #ifdef CONFIG_EXT4_DEBUG
 	Opt_fc_debug_max_replay, Opt_fc_debug_force
 #endif
@@ -1781,7 +1778,6 @@ static const struct fs_parameter_spec ext4_param_specs[] = {
 	fsparam_flag	("bh",			Opt_removed),
 	fsparam_flag	("nobh",		Opt_removed),
 	fsparam_u32	("commit",		Opt_commit),
-	fsparam_u32	("journal_subblock",	Opt_journal_subblock),
 	fsparam_u32	("min_batch_time",	Opt_min_batch_time),
 	fsparam_u32	("max_batch_time",	Opt_max_batch_time),
 	fsparam_u32	("journal_dev",		Opt_journal_dev),
@@ -1994,7 +1990,6 @@ ext4_sb_read_encoding(const struct ext4_super_block *es)
 #define EXT4_SPEC_s_fc_debug_max_replay		(1 << 17)
 #define EXT4_SPEC_s_sb_block			(1 << 18)
 #define EXT4_SPEC_mb_optimize_scan		(1 << 19)
-#define EXT4_SPEC_journal_subblock		(1 << 20)
 
 struct ext4_fs_context {
 	char		*s_qf_names[EXT4_MAXQUOTAS];
@@ -2014,7 +2009,6 @@ struct ext4_fs_context {
 	unsigned int	s_li_wait_mult;
 	unsigned int	s_max_dir_size_kb;
 	unsigned int	journal_ioprio;
-	unsigned int	journal_subblock;
 	unsigned int	vals_s_mount_opt;
 	unsigned int	mask_s_mount_opt;
 	unsigned int	vals_s_mount_opt2;
@@ -2207,13 +2201,6 @@ static int ext4_parse_param(struct fs_context *fc, struct fs_parameter *param)
 	}
 
 	switch (token) {
-	case Opt_journal_subblock:
-		if (result.uint_32 != 0 && result.uint_32 != 64 &&
-		    result.uint_32 != 128 && result.uint_32 != 256)
-			return -EINVAL;
-		ctx->journal_subblock = result.uint_32;
-		ctx->spec |= EXT4_SPEC_journal_subblock;
-		return 0;
 #ifdef CONFIG_QUOTA
 	case Opt_usrjquota:
 		if (!*param->string)
@@ -2986,9 +2973,6 @@ static int _ext4_show_options(struct seq_file *seq, struct super_block *sb,
 
 	if (sbi->s_sb_block != 1)
 		SEQ_OPTS_PRINT("sb=%llu", sbi->s_sb_block);
-	if (sbi->s_journal && sbi->s_journal->j_subblock_granularity)
-		SEQ_OPTS_PRINT("journal_subblock=%u",
-			       sbi->s_journal->j_subblock_granularity);
 
 	for (m = ext4_mount_opts; m->token != Opt_err; m++) {
 		int want_set = m->flags & MOPT_SET;
@@ -5752,28 +5736,6 @@ static int __ext4_fill_super(struct fs_context *fc, struct super_block *sb)
 	atomic_set(&sbi->s_msg_count, 0);
 
 	/* Register sysfs after all initializations are complete. */
-	if (ctx->spec & EXT4_SPEC_journal_subblock) {
-		journal_t *j = sbi->s_journal;
-
-		/* Explicit mount-time eager control; never silently ignore a mode
-		 * requested by a correctness/performance harness.
-		 */
-		if (!j || j->j_dev != sb->s_bdev ||
-		    test_opt(sb, DATA_FLAGS) != EXT4_MOUNT_ORDERED_DATA ||
-		    test_opt2(sb, JOURNAL_FAST_COMMIT)) {
-			err = -EOPNOTSUPP;
-			goto failed_mount9;
-		}
-		mutex_lock(&j->j_cjfs_config_mutex);
-		j->j_cjfs_pending_eager = true;
-		j->j_cjfs_pending_depth = 1;
-		j->j_cjfs_pending_window_us = 0;
-		j->j_subblock_pending_granularity = ctx->journal_subblock;
-		err = jbd2_cjfs_reconfigure(j);
-		mutex_unlock(&j->j_cjfs_config_mutex);
-		if (err)
-			goto failed_mount9;
-	}
 	err = ext4_register_sysfs(sb);
 	if (err)
 		goto failed_mount9;
@@ -6602,24 +6564,6 @@ static int __ext4_remount(struct fs_context *fc, struct super_block *sb)
 	char *to_free[EXT4_MAXQUOTAS];
 #endif
 
-
-	/* Changing compact mode requires the separate quiescent sysfs protocol.
-	 * Repeating the effective mount option is allowed (including ro/rw).
-	 */
-	if ((ctx->spec & EXT4_SPEC_journal_subblock) &&
-	    (!sbi->s_journal || ctx->journal_subblock !=
-				 sbi->s_journal->j_subblock_granularity))
-		return -EINVAL;
-	if (sbi->s_journal && sbi->s_journal->j_subblock_granularity) {
-		unsigned int opts = (sbi->s_mount_opt & ~ctx->mask_s_mount_opt) |
-				    ctx->vals_s_mount_opt;
-		unsigned int opts2 = (sbi->s_mount_opt2 & ~ctx->mask_s_mount_opt2) |
-				     ctx->vals_s_mount_opt2;
-
-		if ((opts & EXT4_MOUNT_DATA_FLAGS) != EXT4_MOUNT_ORDERED_DATA ||
-		    (opts2 & EXT4_MOUNT2_JOURNAL_FAST_COMMIT))
-			return -EOPNOTSUPP;
-	}
 
 	/* Store the original options */
 	old_sb_flags = sb->s_flags;

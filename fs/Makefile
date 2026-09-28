@@ -130,3 +130,6 @@ obj-$(CONFIG_VBOXSF_FS)		+= vboxsf/
 obj-$(CONFIG_ZONEFS_FS)		+= zonefs/
 obj-$(CONFIG_BPF_LSM)		+= bpf_fs_kfuncs.o
 obj-$(CONFIG_RESCTRL_FS)	+= resctrl/
+
+obj-$(CONFIG_JRNL_COMP_EXT4_FS) += jrnl_comp_ext4/
+obj-$(CONFIG_JRNL_COMP_JBD2) += jrnl_comp_jbd2/

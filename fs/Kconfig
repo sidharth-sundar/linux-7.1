@@ -424,3 +424,6 @@ config IO_WQ
 	bool
 
 endmenu
+
+source "fs/jrnl_comp_ext4/Kconfig"
+source "fs/jrnl_comp_jbd2/Kconfig"

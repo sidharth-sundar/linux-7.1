@@ -388,16 +388,23 @@ static int filemap_writeback(struct address_space *mapping, loff_t start,
 	int ret;
 	struct blk_plug plug;
 
+	if (!test_bit(AS_JRNL_COMP, &mapping->flags) &&
+	    (sync_mode == WB_ORDERED_ALL || sync_mode == WB_BARRIER_ALL))
+		return -EOPNOTSUPP;
 	if (!mapping_can_writeback(mapping) ||
 	    !mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
 		return 0;
-
 	wbc_attach_fdatawrite_inode(&wbc, mapping->host);
-	blk_start_plug(&plug);
-	ret = do_writepages(mapping, &wbc);
-	if (sync_mode == WB_BARRIER_ALL && current->__epoch)
-		blk_finish_epoch();
-	blk_finish_plug(&plug);
+	if (test_bit(AS_JRNL_COMP, &mapping->flags)) {
+		blk_start_plug(&plug);
+		ret = do_writepages(mapping, &wbc);
+		if (sync_mode == WB_BARRIER_ALL && current->__epoch)
+			blk_finish_epoch();
+		blk_finish_plug(&plug);
+	} else {
+		/* Stock branch: same call sequence as the pinned baseline. */
+		ret = do_writepages(mapping, &wbc);
+	}
 	wbc_detach_inode(&wbc);
 
 	if (!ret && nr_to_write)
@@ -459,6 +466,9 @@ void filemap_fdatadispatch_range(struct address_space *mapping,
 	struct folio_batch pvec;
 	int nr_pages;
 
+	/* Void wait API: unmarked mappings must never enter dispatch waits. */
+	if (!test_bit(AS_JRNL_COMP, &mapping->flags))
+		return;
 	if (end_byte < start_byte)
 		return;
 
@@ -498,6 +508,8 @@ int filemap_write_and_dispatch_range(struct address_space *mapping, loff_t lstar
 {
 	int err = 0;
 
+	if (!test_bit(AS_JRNL_COMP, &mapping->flags))
+		return -EOPNOTSUPP;
 	if (mapping_needs_writeback(mapping)) {
 		err = filemap_writeback(mapping, lstart, lend, WB_ORDERED_ALL, NULL);
 		/*
@@ -1737,7 +1749,9 @@ EXPORT_SYMBOL_GPL(folio_end_dropbehind);
  */
 void folio_end_writeback_no_dropbehind(struct folio *folio)
 {
-	folio_end_dispatch(folio);
+	/* Submission state survives mapping detach; never infer ownership here. */
+	if (folio_test_dispatch(folio))
+		folio_end_dispatch(folio);
 	VM_BUG_ON_FOLIO(!folio_test_writeback(folio), folio);
 
 	/*
@@ -1787,6 +1801,8 @@ EXPORT_SYMBOL(folio_end_writeback);
 /* UFS */
 void folio_end_dispatch(struct folio *folio)
 {
+	if (!folio_test_dispatch(folio))
+		return;
 	/*
 	 * Writeback does not hold a folio reference of its own, relying
 	 * on truncation to wait for the clearing of PG_writeback.

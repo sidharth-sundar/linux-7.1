@@ -461,7 +461,7 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
 	}
 
 	/* UFS */
-	rq->tx_id = current->tx_id;
+	rq->tx_id = (data->cmd_flags & REQ_ORDERED) ? current->tx_id : 0;
 
 	return rq;
 }
@@ -1402,7 +1402,8 @@ EXPORT_SYMBOL(blk_mq_start_request);
 /* UFS */
 void blk_mq_dispatch_request(struct request *rq)
 {
-	trace_block_rq_dispatch(rq);
+	if (rq->cmd_bflags & REQ_ORDERED)
+		trace_block_rq_dispatch(rq);
 }
 EXPORT_SYMBOL(blk_mq_dispatch_request);
 
@@ -2706,8 +2707,8 @@ static void blk_mq_bio_to_request(struct request *rq, struct bio *bio,
 
 	rq->bio = rq->biotail = bio;
 	/* UFS */
-	if (bio->bi_opf & REQ_ORDERED)
-		rq->cmd_bflags |= REQ_ORDERED;
+	/* Cached requests must not retain a previous submission's ownership. */
+	rq->cmd_bflags = bio->bi_opf & (REQ_ORDERED | REQ_BARRIER);
 
 	rq->__sector = bio->bi_iter.bi_sector;
 	rq->__data_len = bio->bi_iter.bi_size;
@@ -3126,20 +3127,30 @@ static bool bio_unaligned(const struct bio *bio, struct request_queue *q)
 	return false;
 }
 
-void blk_start_epoch(struct request_queue *q)
+int blk_start_epoch(struct request_queue *q)
 {
 	struct epoch *epoch = current->__epoch;
+	int err;
+
 	if (epoch) {
-		printk(KERN_ERR "UFS: %s: unfinished epoch!\n", __func__);
-		return;
+		/* A caller may not accidentally join another queue's epoch. */
+		return -EBUSY;
+	}
+	if (!blk_get_queue(q))
+		return -ENODEV;
+	err = blk_jrnl_comp_init_epoch_pool(q);
+	if (err) {
+		blk_put_queue(q);
+		return err;
 	}
 	epoch = mempool_alloc(q->epoch_pool, GFP_NOFS);
 	if (!epoch) {
-		printk(KERN_ERR "UFS: %s: epoch alloc failed!\n", __func__);
-		return;
+		blk_put_queue(q);
+		return -ENOMEM;
 	}
 
 	memset(epoch, 0, sizeof(struct epoch));
+	spin_lock_init(&epoch->state_lock);
 	epoch->task = current;
 	epoch->q = q;
 
@@ -3153,27 +3164,45 @@ void blk_start_epoch(struct request_queue *q)
 	get_epoch(epoch);
 
 	current->__epoch = epoch;
-
+	return 0;
 }
 EXPORT_SYMBOL(blk_start_epoch);
 
 void blk_finish_epoch(void)
 {
-	struct epoch *epoch = current->__epoch;
+	struct epoch *epoch = xchg(&current->__epoch, NULL);
+	unsigned long flags;
 	if (!epoch) {
 		printk(KERN_ERR "UFS: %s: unstarted epoch!\n", __func__);
 		return;
 	}
-	if (atomic_read(&epoch->pending) == 0) {
-		epoch->task->barrier_fail = 1;
+	spin_lock_irqsave(&epoch->state_lock, flags);
+	if (atomic_read(&epoch->pending) == 0 || epoch->error) {
+		current->barrier_fail = 1;
 	}
 	else
 		epoch->barrier = 1;
-
-	current->__epoch = 0;
+	spin_unlock_irqrestore(&epoch->state_lock, flags);
 	put_epoch(epoch);
 }
 EXPORT_SYMBOL(blk_finish_epoch);
+
+/* An abandoned scope must never publish an ordering-success marker. */
+void blk_abort_epoch(void)
+{
+	struct epoch *epoch = xchg(&current->__epoch, NULL);
+	unsigned long flags;
+
+	if (!epoch)
+		return;
+	spin_lock_irqsave(&epoch->state_lock, flags);
+	epoch->error = ECANCELED;
+	epoch->barrier = 0;
+	spin_unlock_irqrestore(&epoch->state_lock, flags);
+	current->barrier_fail = 1;
+	put_epoch(epoch);
+}
+EXPORT_SYMBOL(blk_abort_epoch);
 
 
 /**
@@ -3255,8 +3284,22 @@ void blk_mq_submit_bio(struct bio *bio)
 
 	/* UFS */
 	if (bio->bi_opf & REQ_ORDERED) {
+		if (bio->bi_opf & REQ_NOWAIT) {
+			bio_wouldblock_error(bio);
+			goto queue_exit;
+		}
+		if (current->__epoch && current->__epoch->q != q) {
+			/* Fail closed rather than move another device's epoch boundary. */
+			current->barrier_fail = 1;
+			bio_io_error(bio);
+			goto queue_exit;
+		}
 		if (!current->__epoch) {
-			blk_start_epoch(q);
+			if (blk_start_epoch(q)) {
+				current->barrier_fail = 1;
+				bio_io_error(bio);
+				goto queue_exit;
+			}
 		}
 
 		get_epoch(current->__epoch);

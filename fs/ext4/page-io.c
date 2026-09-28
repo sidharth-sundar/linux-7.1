@@ -401,10 +401,6 @@ void ext4_io_submit(struct ext4_io_submit *io)
 	if (bio) {
 		if (io->io_wbc->sync_mode == WB_SYNC_ALL)
 			io->io_bio->bi_opf |= REQ_SYNC;
-		/* UFS */
-		else if (io->io_wbc->sync_mode == WB_ORDERED_ALL
-			  || io->io_wbc->sync_mode == WB_BARRIER_ALL)
-			io->io_bio->bi_opf |= (REQ_SYNC | REQ_ORDERED);
 		blk_crypto_submit_bio(io->io_bio);
 	}
 	io->io_bio = NULL;

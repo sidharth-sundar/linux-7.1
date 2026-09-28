@@ -3010,7 +3010,8 @@ void __folio_start_writeback(struct folio *folio, bool keep_write)
 
 		xas_lock_irqsave(&xas, flags);
 		xas_load(&xas);
-		folio_set_dispatch(folio);
+		if (mapping && test_bit(AS_JRNL_COMP, &mapping->flags))
+			folio_set_dispatch(folio);
 		folio_test_set_writeback(folio);
 
 		on_wblist = mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK);
@@ -3035,7 +3036,8 @@ void __folio_start_writeback(struct folio *folio, bool keep_write)
 			xas_clear_mark(&xas, PAGECACHE_TAG_TOWRITE);
 		xas_unlock_irqrestore(&xas, flags);
 	} else {
-		folio_set_dispatch(folio);
+		if (mapping && test_bit(AS_JRNL_COMP, &mapping->flags))
+			folio_set_dispatch(folio);
 		folio_test_set_writeback(folio);
 	}
 

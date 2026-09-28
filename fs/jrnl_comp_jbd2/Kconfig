@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config JRNL_COMP_JBD2
+	tristate
+	select CRC32
+	help
+	  This is a generic journaling layer for block devices that support
+	  both 32-bit and 64-bit block numbers.  It is currently used by
+	  the jrnl_comp_ext4 and OCFS2 filesystems, but it could also be used to add
+	  journal support to other file systems or block devices such
+	  as RAID or LVM.
+
+	  If you are using jrnl_comp_ext4 or OCFS2, you need to say Y here.
+	  If you are not using jrnl_comp_ext4 or OCFS2 then you will
+	  probably want to say N.
+
+	  To compile this device as a module, choose M here. The module will be
+	  called jrnl_comp_jbd2.  If you are compiling jrnl_comp_ext4 or OCFS2 into the kernel,
+	  you cannot compile this code as a module.
+
+config JRNL_COMP_JBD2_DEBUG
+	bool "JRNL_COMP_JBD2 (jrnl_comp_ext4) debugging support"
+	depends on JRNL_COMP_JBD2
+	help
+	  If you are using the jrnl_comp_ext4 journaled file system (or
+	  potentially any other filesystem/device using JRNL_COMP_JBD2), this option
+	  allows you to enable debugging output while the system is running,
+	  in order to help track down any problems you are having.
+	  By default, the debugging output will be turned off.
+
+	  If you select Y here, then you will be able to turn on debugging
+	  with "echo N > /sys/module/jrnl_comp_jbd2/parameters/jrnl_comp_jbd2_debug", where N is a
+	  number between 1 and 5. The higher the number, the more debugging
+	  output is generated.  To turn debugging off again, do
+	  "echo 0 > /sys/module/jrnl_comp_jbd2/parameters/jrnl_comp_jbd2_debug".
+
+config JRNL_COMP_JBD2_INTERVAL_DIAG
+	bool "JRNL_COMP_JBD2 paired interval diagnostic tracepoints"
+	depends on JRNL_COMP_JBD2 && TRACING
+	default n
+	help
+	  Explicit paired API, wait and flush intervals for journal attribution.
+	  Tracepoints are disabled by default at runtime. Instrumented calls
+	  may be nested and must not be summed without interval-union accounting.
+	  Intended for controlled experiments, not a stable userspace ABI.
+	  If unsure, say N.

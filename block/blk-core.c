@@ -39,6 +39,7 @@
 #include <linux/bpf.h>
 #include <linux/part_stat.h>
 #include <linux/sched/sysctl.h>
+#include <linux/sched/mm.h>
 #include <linux/blk-crypto.h>
 
 #define CREATE_TRACE_POINTS
@@ -68,8 +69,43 @@ static DEFINE_IDA(blk_queue_ida);
  */
 static struct kmem_cache *blk_requestq_cachep;
 
-/* UFS */
-struct kmem_cache *epoch_cachep;
+/* Created only by explicit experimental I/O; retained for kernel lifetime. */
+static struct kmem_cache *jrnl_comp_epoch_cachep;
+static DEFINE_MUTEX(jrnl_comp_epoch_pool_lock);
+
+/* Caller holds a queue reference. Stock queue creation never allocates this. */
+int blk_jrnl_comp_init_epoch_pool(struct request_queue *q)
+{
+	mempool_t *pool;
+	unsigned int nofs;
+	int err = 0;
+
+	if (smp_load_acquire(&q->epoch_pool))
+		return 0;
+	mutex_lock(&jrnl_comp_epoch_pool_lock);
+	/* Cache creation allocates internally: avoid filesystem reclaim recursion. */
+	nofs = memalloc_nofs_save();
+	if (!jrnl_comp_epoch_cachep) {
+		jrnl_comp_epoch_cachep = kmem_cache_create("jrnl_comp_epoch",
+				sizeof(struct epoch), 0, 0, NULL);
+		if (!jrnl_comp_epoch_cachep) {
+			err = -ENOMEM;
+			goto out;
+		}
+	}
+	if (!q->epoch_pool) {
+		pool = mempool_create_node(BLKDEV_MIN_RQ, mempool_alloc_slab,
+			mempool_free_slab, jrnl_comp_epoch_cachep, GFP_NOFS, q->node);
+		if (!pool)
+			err = -ENOMEM;
+		else
+			smp_store_release(&q->epoch_pool, pool);
+	}
+out:
+	memalloc_nofs_restore(nofs);
+	mutex_unlock(&jrnl_comp_epoch_pool_lock);
+	return err;
+}
 
 /*
  * Controlling structure to kblockd
@@ -425,17 +461,6 @@ struct request_queue *blk_alloc_queue(struct queue_limits *lim, int node_id)
 	q->limits = *lim;
 
 	q->node = node_id;
-
-	/* UFS */
-	if(!q->epoch_pool)
-		q->epoch_pool = mempool_create_node(BLKDEV_MIN_RQ, mempool_alloc_slab,
-			mempool_free_slab, epoch_cachep, GFP_NOFS, q->node);
-
-	if(!q->epoch_pool) {
-		printk(KERN_ERR "epoch_pool create error\n");
-		error = -ENOMEM;
-		goto fail_stats;
-	}
 
 	atomic_set(&q->nr_active_requests_shared_tags, 0);
 
@@ -1298,10 +1323,8 @@ void blk_request_dispatched(struct request *req)
 		struct epoch *epoch = xchg(&bio->bi_epoch, NULL);
 
 		if (epoch) {
-			if (atomic_dec_return(&epoch->pending) == 0 &&
-			    READ_ONCE(epoch->barrier))
+			if (blk_epoch_retire_pending(epoch, true))
 				req->cmd_bflags |= REQ_BARRIER;
-			atomic_inc(&epoch->dispatch);
 			put_epoch(epoch);
 		}
 		/* Large folios may span requests; use writeback completion there. */
@@ -1338,9 +1361,6 @@ int __init blk_dev_init(void)
 		panic("Failed to create kblockd\n");
 
 	blk_requestq_cachep = KMEM_CACHE(request_queue, SLAB_PANIC);
-	/* UFS */
-	epoch_cachep = kmem_cache_create("blkdev_epoch",
-					sizeof(struct epoch), 0, SLAB_PANIC, NULL);
 
 	blk_debugfs_root = debugfs_create_dir("block", NULL);
 

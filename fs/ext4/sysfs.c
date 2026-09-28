@@ -8,7 +8,6 @@
  *
  */
 
-#include <linux/jbd2_workvolume.h>
 #include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
@@ -21,7 +20,6 @@
 
 typedef enum {
 	attr_noop,
-	attr_cjfs,
 	attr_delayed_allocation_blocks,
 	attr_session_write_kbytes,
 	attr_lifetime_write_kbytes,
@@ -64,114 +62,6 @@ struct ext4_attr {
 		void *explicit_ptr;
 	} u;
 };
-
-/* Trylock is essential: unmount holds s_umount while removing sysfs. */
-static ssize_t cjfs_attr_access(struct ext4_sb_info *sbi, const char *name,
-                               char *out, const char *in, size_t count)
-{
- struct super_block *sb = sbi->s_sb;
- journal_t *j;
- unsigned int value;
- ssize_t ret = -EINVAL;
-
- if (in && !capable(CAP_SYS_ADMIN))
-  return -EPERM;
- if (!down_read_trylock(&sb->s_umount))
-  return -EBUSY;
- j = sbi->s_journal;
- if (!j) {
-  ret = -ENODEV;
-  goto unlock_sb;
- }
- mutex_lock(&j->j_cjfs_config_mutex);
- if (!in && !strncmp(name, "collect_", 8)) {
-  ret = jbd2_wv_access(j, sb, name, out, NULL, 0);
-  goto unlock_config;
- }
- if (!in) {
-  if (!strcmp(name, "effective"))
-   ret = sysfs_emit(out, "%u %s %u %llu\n", j->j_cjfs_depth,
-      j->j_cjfs_eager ? "eager" : "lazy", j->j_cjfs_window_us,
-      j->j_cjfs_generation);
-  else if (!strcmp(name, "pending_version_depth"))
-   ret = sysfs_emit(out, "%u\n", j->j_cjfs_pending_depth);
-  else if (!strcmp(name, "pending_copy_mode"))
-   ret = sysfs_emit(out, "%s\n", j->j_cjfs_pending_eager ? "eager" : "lazy");
-  else if (!strcmp(name, "pending_coalesce_us"))
-   ret = sysfs_emit(out, "%u\n", j->j_cjfs_pending_window_us);
-  else if (!strcmp(name, "pending_subblock_granularity"))
-   ret = sysfs_emit(out, "%u\n", j->j_subblock_pending_granularity);
-  else if (!strcmp(name, "subblock_status"))
-   ret = sysfs_emit(out, "%u %llu %llu %llu %llu\n",
-      j->j_subblock_granularity,
-      READ_ONCE(j->j_subblock_containers), READ_ONCE(j->j_subblock_images),
-      READ_ONCE(j->j_subblock_payload_bytes), READ_ONCE(j->j_subblock_replayed));
-  goto unlock_config;
- }
- if (in && is_journal_aborted(j) &&
-     (!strcmp(name, "collect_phase") || !strcmp(name, "collect_stop"))) {
-  ret = jbd2_wv_access(j, sb, name, NULL, in, count);
-  goto unlock_config;
- }
- if (sb_rdonly(sb) || is_journal_aborted(j)) {
-  ret = -EROFS;
-  goto unlock_config;
- }
- if (sb->s_writers.frozen != SB_UNFROZEN) {
-  ret = -EBUSY;
-  goto unlock_config;
- }
- /* Initial experiment supports ordered data with an internal journal. */
- if (test_opt(sb, DATA_FLAGS) != EXT4_MOUNT_ORDERED_DATA ||
-     test_opt2(sb, JOURNAL_FAST_COMMIT) || j->j_dev != sb->s_bdev) {
-  ret = -EOPNOTSUPP;
-  goto unlock_config;
- }
- if (!strncmp(name, "collect_", 8)) {
-  ret = jbd2_wv_access(j, sb, name, NULL, in, count);
-  goto unlock_config;
- }
- if (!strcmp(name, "pending_copy_mode")) {
-  if (sysfs_streq(in, "eager"))
-   j->j_cjfs_pending_eager = true;
-  else if (sysfs_streq(in, "lazy"))
-   j->j_cjfs_pending_eager = false;
-  else
-   goto unlock_config;
- } else {
-  ret = kstrtouint(in, 10, &value);
-  if (ret)
-   goto unlock_config;
-  ret = -EINVAL;
-  if (!strcmp(name, "pending_version_depth")) {
-   if (!value || value > CJFS_MAX_VERSIONS)
-    goto unlock_config;
-   j->j_cjfs_pending_depth = value;
-  } else if (!strcmp(name, "pending_coalesce_us")) {
-   if (value > 10000)
-    goto unlock_config;
-   j->j_cjfs_pending_window_us = value;
-  } else if (!strcmp(name, "pending_subblock_granularity")) {
-   if (value && value != 64 && value != 128 && value != 256)
-    goto unlock_config;
-   j->j_subblock_pending_granularity = value;
-  } else if (!strcmp(name, "apply")) {
-   if (value != 1)
-    goto unlock_config;
-   ret = jbd2_cjfs_reconfigure(j);
-   if (ret)
-    goto unlock_config;
-  } else {
-   goto unlock_config;
-  }
- }
- ret = count;
-unlock_config:
- mutex_unlock(&j->j_cjfs_config_mutex);
-unlock_sb:
- up_read(&sb->s_umount);
- return ret;
-}
 
 static ssize_t session_write_kbytes_show(struct ext4_sb_info *sbi, char *buf)
 {
@@ -284,49 +174,6 @@ static struct ext4_attr ext4_attr_##_name = {				\
 	.attr = {.name = __stringify(_name), .mode = _mode },		\
 	.attr_id = attr_##_id,						\
 }
-
-EXT4_ATTR(pending_version_depth, 0600, cjfs);
-EXT4_ATTR(pending_copy_mode, 0600, cjfs);
-EXT4_ATTR(pending_coalesce_us, 0600, cjfs);
-EXT4_ATTR(effective, 0400, cjfs);
-EXT4_ATTR(pending_subblock_granularity, 0600, cjfs);
-EXT4_ATTR(subblock_status, 0400, cjfs);
-EXT4_ATTR(apply, 0200, cjfs);
-EXT4_ATTR(collect_pending_mask, 0600, cjfs);
-EXT4_ATTR(collect_pending_sample_every, 0600, cjfs);
-EXT4_ATTR(collect_pending_memory_bytes, 0600, cjfs);
-EXT4_ATTR(collect_apply, 0200, cjfs);
-EXT4_ATTR(collect_start, 0200, cjfs);
-EXT4_ATTR(collect_phase, 0600, cjfs);
-EXT4_ATTR(collect_stop, 0200, cjfs);
-EXT4_ATTR(collect_status, 0400, cjfs);
-EXT4_ATTR(collect_workload, 0400, cjfs);
-EXT4_ATTR(collect_drain, 0400, cjfs);
-static struct attribute *cjfs_attrs[] = {
- &ext4_attr_collect_pending_mask.attr,
- &ext4_attr_collect_pending_sample_every.attr,
- &ext4_attr_collect_pending_memory_bytes.attr,
- &ext4_attr_collect_apply.attr,
- &ext4_attr_collect_start.attr,
- &ext4_attr_collect_phase.attr,
- &ext4_attr_collect_stop.attr,
- &ext4_attr_collect_status.attr,
- &ext4_attr_collect_workload.attr,
- &ext4_attr_collect_drain.attr,
-
- &ext4_attr_pending_version_depth.attr,
- &ext4_attr_pending_copy_mode.attr,
- &ext4_attr_pending_coalesce_us.attr,
- &ext4_attr_effective.attr,
- &ext4_attr_pending_subblock_granularity.attr,
- &ext4_attr_subblock_status.attr,
- &ext4_attr_apply.attr,
- NULL,
-};
-static const struct attribute_group cjfs_group = {
- .name = "cjfs",
- .attrs = cjfs_attrs,
-};
 
 #define EXT4_ATTR_FUNC(_name,_mode)  EXT4_ATTR(_name,_mode,_name)
 
@@ -612,8 +459,6 @@ static ssize_t ext4_attr_show(struct kobject *kobj,
 	struct ext4_attr *a = container_of(attr, struct ext4_attr, attr);
 
 	switch (a->attr_id) {
-	case attr_cjfs:
-		return cjfs_attr_access(sbi, attr->name, buf, NULL, 0);
 	case attr_delayed_allocation_blocks:
 		return sysfs_emit(buf, "%llu\n",
 				(s64) EXT4_C2B(sbi,
@@ -708,8 +553,6 @@ static ssize_t ext4_attr_store(struct kobject *kobj,
 	struct ext4_attr *a = container_of(attr, struct ext4_attr, attr);
 
 	switch (a->attr_id) {
-	case attr_cjfs:
-		return cjfs_attr_access(sbi, attr->name, NULL, buf, len);
 	case attr_reserved_clusters:
 		return reserved_clusters_store(sbi, buf, len);
 	case attr_inode_readahead:
@@ -780,15 +623,6 @@ int ext4_register_sysfs(struct super_block *sb)
 		return err;
 	}
 
- if (sbi->s_journal) {
-  err = sysfs_create_group(&sbi->s_kobj, &cjfs_group);
-  if (err) {
-   kobject_put(&sbi->s_kobj);
-   wait_for_completion(&sbi->s_kobj_unregister);
-   return err;
-  }
- }
-
 	if (ext4_proc_root)
 		sbi->s_proc = proc_mkdir(sb->s_id, ext4_proc_root);
 	if (sbi->s_proc) {
@@ -817,8 +651,6 @@ void ext4_unregister_sysfs(struct super_block *sb)
 		remove_proc_subtree(sb->s_id, ext4_proc_root);
 
 	mutex_lock(&sbi->s_error_notify_mutex);
-	if (sbi->s_journal)
-		sysfs_remove_group(&sbi->s_kobj, &cjfs_group);
 	kobject_del(&sbi->s_kobj);
 	mutex_unlock(&sbi->s_error_notify_mutex);
 }
@@ -863,3 +695,4 @@ void ext4_exit_sysfs(void)
 	remove_proc_entry(proc_dirname, NULL);
 	ext4_proc_root = NULL;
 }
+

@@ -2761,7 +2761,8 @@ static void submit_bh_wbc(blk_opf_t opf, struct buffer_head *bh,
 		wbc_account_cgroup_owner(wbc, bh->b_folio, bh->b_size);
 	}
 
-	lock_buffer_dispatch(bh);
+	if (opf & REQ_ORDERED)
+		lock_buffer_dispatch(bh);
 	blk_crypto_submit_bio(bio);
 }
 

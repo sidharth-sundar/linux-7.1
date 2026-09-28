@@ -787,6 +787,13 @@ static void request_epoch_merge(struct request_queue *q, struct request *req, st
 static struct request *attempt_merge(struct request_queue *q,
 				     struct request *req, struct request *next)
 {
+	/* Ordering ownership must never propagate into an ordinary request. */
+	if ((req->cmd_flags ^ next->cmd_flags) & (REQ_ORDERED | REQ_BARRIER))
+		return NULL;
+	if ((req->cmd_flags & REQ_ORDERED) &&
+	    (!req->bio || !next->bio || !req->bio->bi_epoch ||
+	     req->bio->bi_epoch != next->bio->bi_epoch))
+		return NULL;
 	if (!rq_mergeable(req) || !rq_mergeable(next))
 		return NULL;
 
@@ -910,6 +917,11 @@ bool blk_attempt_req_merge(struct request_queue *q, struct request *rq,
 
 bool blk_rq_merge_ok(struct request *rq, struct bio *bio)
 {
+	if ((rq->cmd_flags ^ bio->bi_opf) & (REQ_ORDERED | REQ_BARRIER))
+		return false;
+	if ((bio->bi_opf & REQ_ORDERED) &&
+	    (!rq->bio || !bio->bi_epoch || rq->bio->bi_epoch != bio->bi_epoch))
+		return false;
 	if (!rq_mergeable(rq) || !bio_mergeable(bio))
 		return false;
 
@@ -969,6 +981,12 @@ enum bio_merge_status bio_attempt_back_merge(struct request *req,
 {
 	const blk_opf_t ff = bio_failfast(bio);
 
+	if ((req->cmd_flags ^ bio->bi_opf) & (REQ_ORDERED | REQ_BARRIER))
+		return BIO_MERGE_FAILED;
+	if ((bio->bi_opf & REQ_ORDERED) &&
+	    (!req->bio || !bio->bi_epoch || req->bio->bi_epoch != bio->bi_epoch))
+		return BIO_MERGE_FAILED;
+
 	if (!ll_back_merge_fn(req, bio, nr_segs))
 		return BIO_MERGE_FAILED;
 
@@ -1002,6 +1020,12 @@ static enum bio_merge_status bio_attempt_front_merge(struct request *req,
 		struct bio *bio, unsigned int nr_segs)
 {
 	const blk_opf_t ff = bio_failfast(bio);
+
+	if ((req->cmd_flags ^ bio->bi_opf) & (REQ_ORDERED | REQ_BARRIER))
+		return BIO_MERGE_FAILED;
+	if ((bio->bi_opf & REQ_ORDERED) &&
+	    (!req->bio || !bio->bi_epoch || req->bio->bi_epoch != bio->bi_epoch))
+		return BIO_MERGE_FAILED;
 
 	/*
 	 * A front merge for writes to sequential zones of a zoned block device
@@ -1043,6 +1067,12 @@ static enum bio_merge_status bio_attempt_discard_merge(struct request_queue *q,
 		struct request *req, struct bio *bio)
 {
 	unsigned short segments = blk_rq_nr_discard_segments(req);
+
+	if ((req->cmd_flags ^ bio->bi_opf) & (REQ_ORDERED | REQ_BARRIER))
+		return BIO_MERGE_FAILED;
+	if ((bio->bi_opf & REQ_ORDERED) &&
+	    (!req->bio || !bio->bi_epoch || req->bio->bi_epoch != bio->bi_epoch))
+		return BIO_MERGE_FAILED;
 
 	if (segments >= queue_max_discard_segments(q))
 		goto no_merge;

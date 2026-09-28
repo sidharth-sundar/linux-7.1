@@ -191,6 +191,8 @@ int vfs_fbarrier_range(struct file *file, loff_t start, loff_t end, int datasync
 {
 	struct inode *inode = file->f_mapping->host;
 
+	if (!test_bit(AS_JRNL_COMP, &file->f_mapping->flags))
+		return -EOPNOTSUPP;
 	if (!file->f_op->fbarrier)
 		return -EINVAL;
 	if (!datasync)

@@ -691,6 +691,4 @@ const struct file_operations ext4_dir_operations = {
 	.fsync		= ext4_sync_file,
 	.release	= ext4_release_dir,
 	.setlease	= generic_setlease,
-	/* UFS */
-	.fbarrier	= ext4_fbarrier_file,
 };

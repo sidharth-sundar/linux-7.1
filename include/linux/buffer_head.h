@@ -460,6 +460,8 @@ static inline void wait_on_buffer_dispatch(struct buffer_head *bh)
 }
 static inline void wake_up_buffer_dispatch(struct buffer_head *bh)
 {
+	if (!buffer_dispatch(bh))
+		return;
 	clear_bit_unlock(BH_Dispatch, &bh->b_state);
 	smp_mb__after_atomic();
 	wake_up_bit(&bh->b_state, BH_Dispatch);

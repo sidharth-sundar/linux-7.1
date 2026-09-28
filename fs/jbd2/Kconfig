@@ -32,14 +32,3 @@ config JBD2_DEBUG
 	  number between 1 and 5. The higher the number, the more debugging
 	  output is generated.  To turn debugging off again, do
 	  "echo 0 > /sys/module/jbd2/parameters/jbd2_debug".
-
-config JBD2_INTERVAL_DIAG
-	bool "JBD2 paired interval diagnostic tracepoints"
-	depends on JBD2 && TRACING
-	default n
-	help
-	  Explicit paired API, wait and flush intervals for journal attribution.
-	  Tracepoints are disabled by default at runtime. Instrumented calls
-	  may be nested and must not be summed without interval-union accounting.
-	  Intended for controlled experiments, not a stable userspace ABI.
-	  If unsure, say N.
