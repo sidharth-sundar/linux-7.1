@@ -3276,6 +3276,7 @@ static void journal_free_journal_head_entry(struct b_jh_entry *jh_entry);
 static struct jrnl_comp_journal_head *journal_alloc_journal_head(void)
 {
 	struct jrnl_comp_journal_head *ret;
+	int ver;
 
 #ifdef CONFIG_JRNL_COMP_JBD2_DEBUG
 	atomic_inc(&nr_journal_heads);
@@ -3288,6 +3289,14 @@ static struct jrnl_comp_journal_head *journal_alloc_journal_head(void)
 				GFP_NOFS | __GFP_NOFAIL);
 	}
 	spin_lock_init(&ret->b_state_lock);
+	/*
+	 * Construct all slots before taking BH_JournalHead's bit spinlock.
+	 * Entry allocation can reclaim or retry with __GFP_NOFAIL and must
+	 * never run in the locked publication section. The existing free
+	 * path releases the complete candidate if another caller wins.
+	 */
+	for (ver = 0; ver < JRNL_COMP_CJFS_MAX_VERSIONS; ver++)
+		ret->b_jh_entry[ver] = journal_alloc_journal_head_entry();
 	return ret;
 }
 
@@ -3373,9 +3382,6 @@ struct jrnl_comp_journal_head *jrnl_comp_jbd2_journal_add_journal_head(struct bu
 {
 	struct jrnl_comp_journal_head *jh;
 	struct jrnl_comp_journal_head *new_jh = NULL;
-	/* JRNL_COMP_CJFS */
-	struct b_jh_entry *new_jh_entry = NULL;
-	int ver = 0;
 
 repeat:
 	if (!buffer_jbd(bh))
@@ -3397,12 +3403,6 @@ repeat:
 		jh = new_jh;
 		new_jh = NULL;		/* We consumed it */
 		set_buffer_jbd(bh);
-		/* JRNL_COMP_CJFS */
-		for (ver = 0; ver < JRNL_COMP_CJFS_MAX_VERSIONS; ver++) {
-			new_jh_entry = journal_alloc_journal_head_entry();
-			jh->b_jh_entry[ver] = new_jh_entry;
-			new_jh_entry = NULL;
-		}
 
 		bh->b_private = jh;
 		jh->b_bh = bh;
