@@ -99,6 +99,17 @@ EXPORT_SYMBOL(jrnl_comp_jbd2_journal_release_jrnl_comp_jbd_inode);
 EXPORT_SYMBOL(jrnl_comp_jbd2_journal_begin_ordered_truncate);
 EXPORT_SYMBOL(jrnl_comp_jbd2_inode_cache);
 
+/*
+ * Development-only lazy-copy selector. Fixed for the module lifetime: every
+ * journal captures the mode before its worker threads start. Never change a
+ * mounted journal between direct-source and frozen-image submission policies.
+ * Default remains the validated eager profile.
+ */
+static bool lazy_shadow_copy;
+module_param(lazy_shadow_copy, bool, 0400);
+MODULE_PARM_DESC(lazy_shadow_copy,
+        "Use experimental lazy shadow copying (default off; full-block depth-one only)");
+
 static int jrnl_comp_jbd2_journal_create_slab(size_t slab_size);
 
 #ifdef DEBUG_PROC_OP
@@ -1912,7 +1923,8 @@ static jrnl_comp_journal_t *journal_init_common(struct block_device *bdev,
 	mutex_init(&journal->j_abort_mutex);
 	mutex_init(&journal->j_jrnl_comp_cjfs_config_mutex);
 	journal->j_jrnl_comp_cjfs_depth = journal->j_jrnl_comp_cjfs_pending_depth = 1;
-	journal->j_jrnl_comp_cjfs_eager = journal->j_jrnl_comp_cjfs_pending_eager = true;
+	journal->j_jrnl_comp_cjfs_eager =
+		journal->j_jrnl_comp_cjfs_pending_eager = !lazy_shadow_copy;
 	journal->j_jrnl_comp_cjfs_generation = 1;
 	mutex_init(&journal->j_barrier);
 	mutex_init(&journal->j_checkpoint_mutex);

@@ -12,9 +12,10 @@ int jrnl_comp_jbd2_jrnl_comp_cjfs_reconfigure(jrnl_comp_journal_t *journal)
  int err;
 
  lockdep_assert_held(&journal->j_jrnl_comp_cjfs_config_mutex);
- /* Initial stock-I/O deployment profile, not a new pipeline experiment. */
+ /* Copy policy is fixed at journal creation; no live mode transitions. */
  if (journal->j_jrnl_comp_cjfs_pending_depth != 1 ||
-     !journal->j_jrnl_comp_cjfs_pending_eager ||
+     journal->j_jrnl_comp_cjfs_pending_eager !=
+         journal->j_jrnl_comp_cjfs_eager ||
      journal->j_jrnl_comp_cjfs_pending_window_us ||
      journal->j_subblock_pending_granularity)
   return -EOPNOTSUPP;
