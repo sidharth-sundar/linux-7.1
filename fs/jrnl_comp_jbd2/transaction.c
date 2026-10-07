@@ -1362,18 +1362,38 @@ int jrnl_comp_jbd2_journal_get_create_access(jrnl_comp_handle_t *handle, struct 
 	 */
 	spin_lock(&jh->b_state_lock);
 	/*
-	 * Because there are multiple committing transactions in BarrierFS,
-	 * I commented this check code out.
-	 * - 2022. 8. 29. Joontaek Oh.
+	 * Restore the upstream create-access exclusion for the depth-one
+	 * private journal. Its old owner may be in either commit stage, but
+	 * must already have left the shadow list. A create caller holds the
+	 * buffer lock and must not bypass the lazy direct-source I/O wait by
+	 * treating live journal metadata as a newly allocated block.
 	 */
-	/*J_ASSERT_JH(jh, (jh->b_transaction == transaction ||
-		jh->b_transaction == NULL ||
-		(jh->b_transaction == journal->j_committing_transaction &&
-			  jh->b_jlist == BJ_Forget)));*/
+	{
+		struct b_jh_entry *entry = jh->b_jh_entry[ver_tid];
+		bool valid_owner;
 
-	/* JRNL_COMP_CJFS */
-	J_ASSERT_JH(jh, jh->b_jh_entry[ver_tid]->b_next_transaction == NULL);
-	J_ASSERT_JH(jh, buffer_locked(jrnl_comp_jh2bh(jh)));
+		spin_lock(&journal->j_list_lock);
+		valid_owner = !entry->b_transaction ||
+			entry->b_transaction == transaction ||
+			(entry->b_jlist == BJ_Forget &&
+			 (entry->b_transaction == journal->j_committing_transaction ||
+			  entry->b_transaction == journal->j_flushing_transactions));
+		if (!valid_owner || entry->b_next_transaction ||
+		    test_bit(0, &entry->b_io_state)) {
+			err = -EROFS;
+			spin_unlock(&journal->j_list_lock);
+			spin_unlock(&jh->b_state_lock);
+			jrnl_comp_jbd2_journal_abort(journal, err);
+			goto out;
+		}
+		spin_unlock(&journal->j_list_lock);
+	}
+	if (WARN_ON_ONCE(!buffer_locked(jrnl_comp_jh2bh(jh)))) {
+		err = -EINVAL;
+		spin_unlock(&jh->b_state_lock);
+		jrnl_comp_jbd2_journal_abort(journal, err);
+		goto out;
+	}
 	/* A newly created/reused metadata block needs a complete initializer. */
 	jh->b_jh_entry[ver_tid]->b_subblock_tid = transaction->t_tid;
 	jh->b_jh_entry[ver_tid]->b_subblock_dirty = ~0ULL;
