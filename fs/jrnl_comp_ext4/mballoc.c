@@ -3624,7 +3624,7 @@ static int jrnl_comp_ext4_groupinfo_create_slab(size_t size)
 				bb_counters[blocksize_bits + 2]);
 
 	cachep = kmem_cache_create(jrnl_comp_ext4_groupinfo_slab_names[cache_index],
-					slab_size, 0, SLAB_RECLAIM_ACCOUNT,
+					slab_size, 0, SLAB_RECLAIM_ACCOUNT | SLAB_NO_MERGE,
 					NULL);
 
 	jrnl_comp_ext4_groupinfo_caches[cache_index] = cachep;
@@ -4055,17 +4055,17 @@ void jrnl_comp_ext4_process_freed_data(struct super_block *sb, jrnl_comp_tid_t c
 int __init jrnl_comp_ext4_init_mballoc(void)
 {
 	jrnl_comp_ext4_pspace_cachep = KMEM_CACHE(jrnl_comp_ext4_prealloc_space,
-					SLAB_RECLAIM_ACCOUNT);
+					SLAB_RECLAIM_ACCOUNT | SLAB_NO_MERGE);
 	if (jrnl_comp_ext4_pspace_cachep == NULL)
 		goto out;
 
 	jrnl_comp_ext4_ac_cachep = KMEM_CACHE(jrnl_comp_ext4_allocation_context,
-				    SLAB_RECLAIM_ACCOUNT);
+				    SLAB_RECLAIM_ACCOUNT | SLAB_NO_MERGE);
 	if (jrnl_comp_ext4_ac_cachep == NULL)
 		goto out_pa_free;
 
 	jrnl_comp_ext4_free_data_cachep = KMEM_CACHE(jrnl_comp_ext4_free_data,
-					   SLAB_RECLAIM_ACCOUNT);
+					   SLAB_RECLAIM_ACCOUNT | SLAB_NO_MERGE);
 	if (jrnl_comp_ext4_free_data_cachep == NULL)
 		goto out_ac_free;
 

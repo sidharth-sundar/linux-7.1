@@ -191,7 +191,9 @@ static int __revise_pending(struct inode *inode, jrnl_comp_ext4_lblk_t lblk,
 
 int __init jrnl_comp_ext4_init_es(void)
 {
-	jrnl_comp_ext4_es_cachep = KMEM_CACHE(extent_status, SLAB_RECLAIM_ACCOUNT);
+	jrnl_comp_ext4_es_cachep = kmem_cache_create("jrnl_comp_ext4_extent_status", sizeof(struct extent_status),
+				__alignof__(struct extent_status),
+				SLAB_RECLAIM_ACCOUNT | SLAB_NO_MERGE, NULL);
 	if (jrnl_comp_ext4_es_cachep == NULL)
 		return -ENOMEM;
 	return 0;
@@ -2014,7 +2016,9 @@ static void jrnl_comp_ext4_print_pending_tree(struct inode *inode)
 
 int __init jrnl_comp_ext4_init_pending(void)
 {
-	jrnl_comp_ext4_pending_cachep = KMEM_CACHE(pending_reservation, SLAB_RECLAIM_ACCOUNT);
+	jrnl_comp_ext4_pending_cachep = kmem_cache_create("jrnl_comp_ext4_pending_reservation", sizeof(struct pending_reservation),
+				__alignof__(struct pending_reservation),
+				SLAB_RECLAIM_ACCOUNT | SLAB_NO_MERGE, NULL);
 	if (jrnl_comp_ext4_pending_cachep == NULL)
 		return -ENOMEM;
 	return 0;

@@ -35,11 +35,11 @@ static struct kmem_cache *io_end_vec_cachep;
 
 int __init jrnl_comp_ext4_init_pageio(void)
 {
-	io_end_cachep = KMEM_CACHE(jrnl_comp_ext4_io_end, SLAB_RECLAIM_ACCOUNT);
+	io_end_cachep = KMEM_CACHE(jrnl_comp_ext4_io_end, SLAB_RECLAIM_ACCOUNT | SLAB_NO_MERGE);
 	if (io_end_cachep == NULL)
 		return -ENOMEM;
 
-	io_end_vec_cachep = KMEM_CACHE(jrnl_comp_ext4_io_end_vec, 0);
+	io_end_vec_cachep = KMEM_CACHE(jrnl_comp_ext4_io_end_vec, SLAB_NO_MERGE);
 	if (io_end_vec_cachep == NULL) {
 		kmem_cache_destroy(io_end_cachep);
 		return -ENOMEM;

@@ -47,7 +47,7 @@ int __init jrnl_comp_jbd2_journal_init_transaction_cache(void)
 	transaction_cache = kmem_cache_create("jrnl_comp_jbd2_transaction_s",
 					sizeof(jrnl_comp_transaction_t),
 					0,
-					SLAB_HWCACHE_ALIGN|SLAB_TEMPORARY,
+					SLAB_HWCACHE_ALIGN|SLAB_TEMPORARY|SLAB_NO_MERGE,
 					NULL);
 	if (!transaction_cache) {
 		pr_emerg("JRNL_COMP_JBD2: failed to create transaction cache\n");

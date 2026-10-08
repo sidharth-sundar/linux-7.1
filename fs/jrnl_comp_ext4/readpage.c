@@ -431,7 +431,9 @@ void jrnl_comp_ext4_readahead(struct readahead_control *rac)
 
 int __init jrnl_comp_ext4_init_post_read_processing(void)
 {
-	bio_post_read_ctx_cache = KMEM_CACHE(bio_post_read_ctx, SLAB_RECLAIM_ACCOUNT);
+	bio_post_read_ctx_cache = kmem_cache_create("jrnl_comp_ext4_bio_post_read_ctx", sizeof(struct bio_post_read_ctx),
+				__alignof__(struct bio_post_read_ctx),
+				SLAB_RECLAIM_ACCOUNT | SLAB_NO_MERGE, NULL);
 
 	if (!bio_post_read_ctx_cache)
 		goto fail;

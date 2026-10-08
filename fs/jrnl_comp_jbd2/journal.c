@@ -3168,7 +3168,7 @@ static int jrnl_comp_jbd2_journal_create_slab(size_t size)
 
 	slab_size = 1 << (i+10);
 	jrnl_comp_jbd2_slab[i] = kmem_cache_create(jrnl_comp_jbd2_slab_names[i], slab_size,
-					 slab_size, 0, NULL);
+					 slab_size, SLAB_NO_MERGE, NULL);
 	mutex_unlock(&jrnl_comp_jbd2_slab_create_mutex);
 	if (!jrnl_comp_jbd2_slab[i]) {
 		printk(KERN_EMERG "JRNL_COMP_JBD2: no memory for jrnl_comp_jbd2_slab cache\n");
@@ -3228,7 +3228,7 @@ static int __init jrnl_comp_jbd2_journal_init_journal_head_cache(void)
 	jrnl_comp_jbd2_journal_head_cache = kmem_cache_create("jrnl_comp_jbd2_journal_head",
 				sizeof(struct jrnl_comp_journal_head),
 				0,		/* offset */
-				SLAB_TEMPORARY | SLAB_TYPESAFE_BY_RCU,
+				SLAB_TEMPORARY | SLAB_TYPESAFE_BY_RCU | SLAB_NO_MERGE,
 				NULL);		/* ctor */
 	if (!jrnl_comp_jbd2_journal_head_cache) {
 		printk(KERN_EMERG "JRNL_COMP_JBD2: no memory for jrnl_comp_journal_head cache\n");
@@ -3252,7 +3252,7 @@ static int __init jrnl_comp_jbd2_journal_init_journal_head_entry_cache(void)
 	jrnl_comp_jbd2_journal_head_entry_cache = kmem_cache_create("jrnl_comp_jbd2_journal_head_entry",
 				sizeof(struct b_jh_entry),
 				0,              /* offset */
-				SLAB_TEMPORARY | SLAB_TYPESAFE_BY_RCU,
+				SLAB_TEMPORARY | SLAB_TYPESAFE_BY_RCU | SLAB_NO_MERGE,
 				NULL);          /* ctor */
 	if (!jrnl_comp_jbd2_journal_head_entry_cache) {
 		printk(KERN_EMERG "JRNL_COMP_JBD2: no memory for journal_head_entry cache\n");
@@ -3575,7 +3575,7 @@ struct kmem_cache *jrnl_comp_jbd2_handle_cache, *jrnl_comp_jbd2_inode_cache;
 static int __init jrnl_comp_jbd2_journal_init_inode_cache(void)
 {
 	J_ASSERT(!jrnl_comp_jbd2_inode_cache);
-	jrnl_comp_jbd2_inode_cache = KMEM_CACHE(jrnl_comp_jbd2_inode, 0);
+	jrnl_comp_jbd2_inode_cache = KMEM_CACHE(jrnl_comp_jbd2_inode, SLAB_NO_MERGE);
 	if (!jrnl_comp_jbd2_inode_cache) {
 		pr_emerg("JRNL_COMP_JBD2: failed to create inode cache\n");
 		return -ENOMEM;
@@ -3586,7 +3586,7 @@ static int __init jrnl_comp_jbd2_journal_init_inode_cache(void)
 static int __init jrnl_comp_jbd2_journal_init_handle_cache(void)
 {
 	J_ASSERT(!jrnl_comp_jbd2_handle_cache);
-	jrnl_comp_jbd2_handle_cache = KMEM_CACHE(jrnl_comp_jbd2_journal_handle, SLAB_TEMPORARY);
+	jrnl_comp_jbd2_handle_cache = KMEM_CACHE(jrnl_comp_jbd2_journal_handle, SLAB_TEMPORARY | SLAB_NO_MERGE);
 	if (!jrnl_comp_jbd2_handle_cache) {
 		printk(KERN_EMERG "JRNL_COMP_JBD2: failed to create handle cache\n");
 		return -ENOMEM;

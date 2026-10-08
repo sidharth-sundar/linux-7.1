@@ -2299,7 +2299,7 @@ int jrnl_comp_ext4_fc_info_show(struct seq_file *seq, void *v)
 int __init jrnl_comp_ext4_fc_init_dentry_cache(void)
 {
 	jrnl_comp_ext4_fc_dentry_cachep = KMEM_CACHE(jrnl_comp_ext4_fc_dentry_update,
-					   SLAB_RECLAIM_ACCOUNT);
+					   SLAB_RECLAIM_ACCOUNT | SLAB_NO_MERGE);
 
 	if (jrnl_comp_ext4_fc_dentry_cachep == NULL)
 		return -ENOMEM;

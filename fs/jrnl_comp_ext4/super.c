@@ -1505,7 +1505,7 @@ static int __init init_inodecache(void)
 	jrnl_comp_ext4_inode_cachep = kmem_cache_create("jrnl_comp_ext4_inode_cache",
 				sizeof(struct jrnl_comp_ext4_inode_info),
 				&args,
-				SLAB_RECLAIM_ACCOUNT | SLAB_ACCOUNT);
+				SLAB_RECLAIM_ACCOUNT | SLAB_ACCOUNT | SLAB_NO_MERGE);
 
 	if (jrnl_comp_ext4_inode_cachep == NULL)
 		return -ENOMEM;

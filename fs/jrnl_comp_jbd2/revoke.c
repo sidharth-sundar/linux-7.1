@@ -196,7 +196,7 @@ int __init jrnl_comp_jbd2_journal_init_revoke_record_cache(void)
 {
 	J_ASSERT(!jrnl_comp_jbd2_revoke_record_cache);
 	jrnl_comp_jbd2_revoke_record_cache = KMEM_CACHE(jrnl_comp_jbd2_revoke_record_s,
-					SLAB_HWCACHE_ALIGN|SLAB_TEMPORARY);
+					SLAB_HWCACHE_ALIGN|SLAB_TEMPORARY | SLAB_NO_MERGE);
 
 	if (!jrnl_comp_jbd2_revoke_record_cache) {
 		pr_emerg("JRNL_COMP_JBD2: failed to create revoke_record cache\n");
@@ -209,7 +209,7 @@ int __init jrnl_comp_jbd2_journal_init_revoke_table_cache(void)
 {
 	J_ASSERT(!jrnl_comp_jbd2_revoke_table_cache);
 	jrnl_comp_jbd2_revoke_table_cache = KMEM_CACHE(jrnl_comp_jbd2_revoke_table_s,
-					     SLAB_TEMPORARY);
+					     SLAB_TEMPORARY | SLAB_NO_MERGE);
 	if (!jrnl_comp_jbd2_revoke_table_cache) {
 		pr_emerg("JRNL_COMP_JBD2: failed to create revoke_table cache\n");
 		return -ENOMEM;

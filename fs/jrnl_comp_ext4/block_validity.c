@@ -31,7 +31,7 @@ static struct kmem_cache *jrnl_comp_ext4_system_zone_cachep;
 
 int __init jrnl_comp_ext4_init_system_zone(void)
 {
-	jrnl_comp_ext4_system_zone_cachep = KMEM_CACHE(jrnl_comp_ext4_system_zone, 0);
+	jrnl_comp_ext4_system_zone_cachep = KMEM_CACHE(jrnl_comp_ext4_system_zone, SLAB_NO_MERGE);
 	if (jrnl_comp_ext4_system_zone_cachep == NULL)
 		return -ENOMEM;
 	return 0;
