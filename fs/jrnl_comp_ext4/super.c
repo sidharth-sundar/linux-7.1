@@ -6175,11 +6175,13 @@ static int jrnl_comp_ext4_load_journal(struct super_block *sb,
 	}
 
 	journal_dev_ro = bdev_read_only(journal->j_dev);
-	/* Check on-disk journal features before wipe or recovery can write. */
+	/* Check on-disk journal features before wipe or recovery can write.
+	 * Sub-block journals written by the 256-byte profile must remain
+	 * recoverable; recovery validates and replays their containers.
+	 */
 	if (journal->j_dev != sb->s_bdev ||
 	    jrnl_comp_jbd2_has_feature_async_commit(journal) ||
-	    jrnl_comp_jbd2_has_feature_fast_commit(journal) ||
-	    jrnl_comp_jbd2_has_feature_subblock(journal)) {
+	    jrnl_comp_jbd2_has_feature_fast_commit(journal)) {
 		err = -EOPNOTSUPP;
 		goto err_out;
 	}
