@@ -12,12 +12,16 @@ int jrnl_comp_jbd2_jrnl_comp_cjfs_reconfigure(jrnl_comp_journal_t *journal)
  int err;
 
  lockdep_assert_held(&journal->j_jrnl_comp_cjfs_config_mutex);
- /* Copy policy is fixed at journal creation; no live mode transitions. */
+ /* Copy policy is fixed at journal creation; no live mode transitions.
+  * Sub-block logging is supported only at 256 bytes (eager, depth 1);
+  * the flush below quiesces the journal before the format changes.
+  */
  if (journal->j_jrnl_comp_cjfs_pending_depth != 1 ||
      journal->j_jrnl_comp_cjfs_pending_eager !=
          journal->j_jrnl_comp_cjfs_eager ||
      journal->j_jrnl_comp_cjfs_pending_window_us ||
-     journal->j_subblock_pending_granularity)
+     (journal->j_subblock_pending_granularity &&
+      journal->j_subblock_pending_granularity != 256))
   return -EOPNOTSUPP;
  if (jrnl_comp_jbd2_wv_active(journal))
   return -EBUSY;
