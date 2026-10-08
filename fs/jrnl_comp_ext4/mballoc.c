@@ -3777,8 +3777,7 @@ int jrnl_comp_ext4_mb_init(struct super_block *sb)
 
 	spin_lock_init(&sbi->s_md_lock);
 	atomic_set(&sbi->s_mb_free_pending, 0);
-	INIT_LIST_HEAD(&sbi->s_freed_data_list[0]);
-	INIT_LIST_HEAD(&sbi->s_freed_data_list[1]);
+	INIT_LIST_HEAD(&sbi->s_freed_data_list);
 	INIT_LIST_HEAD(&sbi->s_discard_list);
 	INIT_WORK(&sbi->s_discard_work, jrnl_comp_ext4_discard_work);
 	atomic_set(&sbi->s_retry_alloc_pending, 0);
@@ -4021,10 +4020,21 @@ void jrnl_comp_ext4_process_freed_data(struct super_block *sb, jrnl_comp_tid_t c
 	struct jrnl_comp_ext4_sb_info *sbi = JRNL_COMP_EXT4_SB(sb);
 	struct jrnl_comp_ext4_free_data *entry, *tmp;
 	LIST_HEAD(freed_data_list);
-	struct list_head *s_freed_head = &sbi->s_freed_data_list[commit_tid & 1];
 	bool wake;
 
-	list_replace_init(s_freed_head, &freed_data_list);
+	/*
+	 * Unlike stock jbd2, the flush thread runs this callback while later
+	 * transactions may already be committing and running, so tid parity
+	 * does not separate their entries. Collect only blocks freed by
+	 * commit_tid or earlier, under s_md_lock to serialize with entries
+	 * being added or merged away by still-running transactions.
+	 */
+	spin_lock(&sbi->s_md_lock);
+	list_for_each_entry_safe(entry, tmp, &sbi->s_freed_data_list, efd_list) {
+		if (tid_geq(commit_tid, entry->efd_tid))
+			list_move_tail(&entry->efd_list, &freed_data_list);
+	}
+	spin_unlock(&sbi->s_md_lock);
 
 	list_for_each_entry(entry, &freed_data_list, efd_list)
 		jrnl_comp_ext4_free_data_in_buddy(sb, entry);
@@ -6500,7 +6510,7 @@ insert:
 	rb_insert_color(new_node, root);
 
 	spin_lock(&sbi->s_md_lock);
-	list_add_tail(&new_entry->efd_list, &sbi->s_freed_data_list[new_entry->efd_tid & 1]);
+	list_add_tail(&new_entry->efd_list, &sbi->s_freed_data_list);
 	spin_unlock(&sbi->s_md_lock);
 }
 
