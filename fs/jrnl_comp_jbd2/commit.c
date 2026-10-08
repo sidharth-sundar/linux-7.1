@@ -177,6 +177,7 @@ static int journal_pack_subblocks(jrnl_comp_transaction_t *t, struct list_head *
 		jrnl_comp_jbd2_file_log_bh(io_bufs, shadow);
 		J_ASSERT(io->count < ARRAY_SIZE(io->sources));
 		io->sources[io->count++] = shadow;
+		t->t_subblock_packed++;
 		image = kmap_local_folio(shadow->b_folio,
 					offset_in_folio(shadow->b_folio, shadow->b_data));
 		for (i = 0; i < units;) {
@@ -2213,6 +2214,8 @@ static void jrnl_comp_jbd2_finish_flushed_transaction(jrnl_comp_journal_t *journ
 	}
 
 	J_ASSERT (commit_transaction->t_shadow_list == NULL);
+	/* Packed sources were counted above but only their containers were logged. */
+	commit_transaction->stats.run.rs_blocks_logged -= commit_transaction->t_subblock_packed;
 
 	jrnl_comp_jbd2_debug(3, "JRNL_COMP_JBD2: commit phase 4\n");
 

@@ -596,6 +596,8 @@ struct jrnl_comp_transaction_s
 {
 	/* Zero keeps the existing full-block format. Frozen at transaction start. */
 	unsigned int t_subblock_granularity;
+	/* Sources packed into containers; their shadows are never submitted. */
+	unsigned int t_subblock_packed;
 	unsigned int t_jrnl_comp_cjfs_depth;
 	bool t_jrnl_comp_cjfs_eager;
 	unsigned int t_jrnl_comp_cjfs_window_us;
