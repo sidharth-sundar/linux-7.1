@@ -3893,6 +3893,13 @@ extern void jrnl_comp_ext4_orphan_file_block_trigger(
  * to mark the bitmap uptodate. We need to also zero-out the bitmap
  */
 #define BH_BITMAP_UPTODATE BH_JBDPrivateStart
+/*
+ * Inode-table buffer synthesized in memory (zeroed, one inode filled) rather
+ * than read from disk. Partial sub-block redo relies on untouched home bytes,
+ * so the first journaled inode update of such a buffer must log the whole
+ * block. BH_BITMAP_UPTODATE + 1 is used as a map flag; skip it.
+ */
+#define BH_JRNL_COMP_EXT4_SYNTH_ITABLE (BH_BITMAP_UPTODATE + 2)
 
 static inline int bitmap_uptodate(struct buffer_head *bh)
 {

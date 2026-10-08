@@ -4938,6 +4938,7 @@ static int __jrnl_comp_ext4_get_inode_loc(struct super_block *sb, unsigned long 
 
 			/* all other inodes are free, so skip I/O */
 			memset(bh->b_data, 0, bh->b_size);
+			set_bit(BH_JRNL_COMP_EXT4_SYNTH_ITABLE, &bh->b_state);
 			if (!jrnl_comp_ext4_test_inode_state(inode, JRNL_COMP_EXT4_STATE_NEW))
 				jrnl_comp_ext4_fill_raw_inode(inode, raw_inode);
 			set_buffer_uptodate(bh);
@@ -5696,10 +5697,13 @@ static int jrnl_comp_ext4_do_update_inode(jrnl_comp_handle_t *handle,
 					      bh->b_data);
 
 	BUFFER_TRACE(bh, "call jrnl_comp_ext4_handle_dirty_metadata");
-	/* Lazytime may update neighboring inodes; otherwise include this entire
-	 * inode (including both checksum fields), not just the requested field.
+	/* Lazytime may update neighboring inodes, and a block synthesized in
+	 * memory has zeroed free slots that disk may not; log the whole block
+	 * then. Otherwise include this entire inode (including both checksum
+	 * fields), not just the requested field.
 	 */
-	if (inode->i_sb->s_flags & SB_LAZYTIME)
+	if ((inode->i_sb->s_flags & SB_LAZYTIME) ||
+	    test_and_clear_bit(BH_JRNL_COMP_EXT4_SYNTH_ITABLE, &bh->b_state))
 		err = jrnl_comp_ext4_handle_dirty_metadata(handle, NULL, bh);
 	else
 		err = jrnl_comp_ext4_handle_dirty_metadata_range(handle, NULL, bh,
