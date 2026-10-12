@@ -15,14 +15,14 @@ int jrnl_comp_jbd2_jrnl_comp_cjfs_reconfigure(jrnl_comp_journal_t *journal)
  /* Copy policy is fixed at journal creation; no live mode transitions.
   * Sub-block logging is supported only at 256 bytes (eager, depth 1);
   * the flush below quiesces the journal before the format changes.
-  * Experimental 100us coalescing is limited to full-block eager depth 1.
+  * Experimental 0-1000us coalescing requires full-block eager depth 1.
   * Keep the zero-window default and reject lazy/compact compositions.
   */
  if (journal->j_jrnl_comp_cjfs_pending_depth != 1 ||
      journal->j_jrnl_comp_cjfs_pending_eager !=
          journal->j_jrnl_comp_cjfs_eager ||
      (journal->j_jrnl_comp_cjfs_pending_window_us &&
-      (journal->j_jrnl_comp_cjfs_pending_window_us != 100 ||
+      (journal->j_jrnl_comp_cjfs_pending_window_us > 1000 ||
        !journal->j_jrnl_comp_cjfs_pending_eager ||
        journal->j_subblock_pending_granularity)) ||
      (journal->j_subblock_pending_granularity &&
