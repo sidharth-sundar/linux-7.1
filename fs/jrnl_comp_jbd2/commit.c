@@ -27,7 +27,33 @@
 #include <linux/bio.h>
 #include <linux/blkdev.h>
 #include <linux/bitops.h>
+#include <linux/moduleparam.h>
 #include <trace/events/jrnl_comp_jbd2.h>
+
+/*
+ * Pipelined commit (level 1). When set, the commit thread hands a transaction
+ * to the flush thread as soon as its commit record is submitted, instead of
+ * waiting for that write to complete, and starts the next commit. The record
+ * is still submitted only after the transaction's ordered data and log
+ * blocks have completed, so the on-disk format and recovery are unchanged:
+ * replay stops at the first transaction without a valid commit block, which
+ * discards any later transaction whose predecessor's record did not reach
+ * the disk.
+ *
+ * Durability moves entirely to the flush thread, which already waits for
+ * every log block and commit record in TID order before advancing
+ * j_flush_sequence. fsync and other durability waiters, version release,
+ * checkpoint insertion, freed-block release (j_commit_callback) and log-tail
+ * updates already key on that point. j_commit_sequence may then run ahead of
+ * j_flush_sequence by more than one transaction; it means "record
+ * submitted", not "durable".
+ *
+ * Read once per commit, so it can be changed at runtime.
+ */
+static bool pipeline_commit;
+module_param(pipeline_commit, bool, 0644);
+MODULE_PARM_DESC(pipeline_commit,
+		 "Start the next commit without waiting for the previous commit record");
 
 /*
  * IO end handler for temporary buffer_heads handling writes to the journal.
@@ -1430,6 +1456,32 @@ static bool jrnl_comp_cjfs_coalesce(jrnl_comp_journal_t *j, jrnl_comp_transactio
 	return true;
 }
 
+/*
+ * With pipeline_commit the previous transaction may still be in flight when
+ * the next commit starts, and a conflict with it clears only when it becomes
+ * durable. Wait for that while the transaction is still running, as the
+ * serial path effectively does, so that new handles keep joining instead of
+ * blocking on a locked transaction. Termination: only transactions older than
+ * @t can be in flight while @t runs, and each becomes durable in bounded time.
+ */
+static bool jrnl_comp_pipeline_may_wait(jrnl_comp_journal_t *j, bool pipelined)
+{
+	return pipelined && !READ_ONCE(j->j_jrnl_comp_cjfs_reconfiguring) &&
+	       !is_journal_aborted(j);
+}
+
+static void jrnl_comp_pipeline_conflict_wait(jrnl_comp_journal_t *j, jrnl_comp_transaction_t *t)
+{
+	u64 begin = ktime_get_ns();
+
+	wait_event(j->j_wait_done_flush,
+		!atomic_read(&t->t_conflict_count) ||
+		READ_ONCE(j->j_jrnl_comp_cjfs_reconfiguring) || is_journal_aborted(j));
+	trace_jrnl_comp_cjfs_event(j->j_fs_dev->bd_dev, t->t_tid,
+		t->t_jrnl_comp_cjfs_generation, "pipeline_conflict_wait_ns",
+		ktime_get_ns() - begin);
+}
+
 static void jrnl_comp_cjfs_coalesce_wait(jrnl_comp_journal_t *j, jrnl_comp_transaction_t *t, u64 deadline)
 {
 	s64 left = deadline - ktime_get_ns();
@@ -1469,6 +1521,9 @@ void jrnl_comp_jbd2_journal_barrier_commit_transaction(jrnl_comp_journal_t *jour
 	/* JRNL_COMP_CJFS */
 	int ver_tid;
 	u64 coalesce_deadline = 0;
+	bool pipelined = READ_ONCE(pipeline_commit);
+	bool reopen;
+	unsigned int inflight = 0;
 #ifdef CONFIG_JRNL_COMP_JBD2_INTERVAL_DIAG
 	struct jrnl_comp_jbd2_interval_ctx diag_ctx;
 	bool diag_enabled = trace_jrnl_comp_jbd2_interval_enabled();
@@ -1555,6 +1610,10 @@ op_coalescing:
 			jrnl_comp_cjfs_coalesce_wait(journal, commit_transaction, coalesce_deadline));
 		goto op_coalescing;
 	}
+	if (atomic_read(&commit_transaction->t_conflict_count) &&
+	    jrnl_comp_pipeline_may_wait(journal, pipelined))
+		ji_wait(journal, commit_transaction->t_tid, JI_COALESCE, 0,
+			jrnl_comp_pipeline_conflict_wait(journal, commit_transaction));
 
 	start = ktime_get();
 
@@ -1595,12 +1654,17 @@ op_coalescing:
 	if (atomic_read(&commit_transaction->t_conflict_count)) {
 		trace_jrnl_comp_cjfs_event(journal->j_fs_dev->bd_dev, commit_transaction->t_tid,
 			commit_transaction->t_jrnl_comp_cjfs_generation, "conflict", 1);
-		if (jrnl_comp_cjfs_coalesce(journal, commit_transaction, &coalesce_deadline)) {
+		reopen = jrnl_comp_cjfs_coalesce(journal, commit_transaction,
+						 &coalesce_deadline);
+
+		/* A handle that joined after the running-state wait conflicted. */
+		if (reopen || jrnl_comp_pipeline_may_wait(journal, pipelined)) {
 			commit_transaction->t_state = T_RUNNING;
 			write_unlock(&journal->j_state_lock);
 			wake_up_all(&journal->j_wait_transaction_locked);
-			ji_wait(journal, commit_transaction->t_tid, JI_COALESCE, 0,
-			jrnl_comp_cjfs_coalesce_wait(journal, commit_transaction, coalesce_deadline));
+			if (reopen)
+				ji_wait(journal, commit_transaction->t_tid, JI_COALESCE, 0,
+				jrnl_comp_cjfs_coalesce_wait(journal, commit_transaction, coalesce_deadline));
 			goto op_coalescing;
 		}
 		write_unlock(&journal->j_state_lock);
@@ -2035,8 +2099,11 @@ start_journal_io:
 			jrnl_comp_jbd2_journal_abort(journal, err);
 	}
 
-	/* UFS */
-	if (commit_transaction->t_cbh)
+	/*
+	 * With pipeline_commit the flush thread waits for the record instead,
+	 * in TID order, before anything treats this transaction as durable.
+	 */
+	if (commit_transaction->t_cbh && !pipelined)
 		err = journal_wait_on_commit_record_retained(journal,
 				commit_transaction->t_cbh);
 	if (err)
@@ -2105,8 +2172,20 @@ start_journal_io:
 		commit_transaction->t_flushprev->t_flushnext =
 				commit_transaction;
 	}
+	{
+		jrnl_comp_transaction_t *t = journal->j_flushing_transactions;
+
+		do {
+			inflight++;
+			t = t->t_flushnext;
+		} while (t != journal->j_flushing_transactions);
+	}
 	spin_unlock(&journal->j_list_lock);
 
+	/* Transactions handed off but not yet durable, including this one. */
+	trace_jrnl_comp_cjfs_event(journal->j_fs_dev->bd_dev, commit_transaction->t_tid,
+		commit_transaction->t_jrnl_comp_cjfs_generation,
+		pipelined ? "handoff_pipelined" : "handoff_serial", inflight);
 	trace_jrnl_comp_cjfs_event(journal->j_fs_dev->bd_dev, commit_transaction->t_tid,
 		commit_transaction->t_jrnl_comp_cjfs_generation, "submitted_handles",
 		atomic_read(&commit_transaction->t_handle_count));
@@ -2568,10 +2647,11 @@ void jrnl_comp_jbd2_journal_barrier_flush_transaction(jrnl_comp_journal_t *journ
 		}
 	}
 	/*
-	 * Without async_commit the commit record carried REQ_PREFLUSH | REQ_FUA,
-	 * was submitted only after every log and ordered-data write completed,
-	 * and the commit thread waited for it: the transaction is already
-	 * durable. As in stock JBD2, only async_commit needs a flush here.
+	 * Without async_commit the commit record carried REQ_PREFLUSH | REQ_FUA
+	 * and was submitted only after every log and ordered-data write
+	 * completed. Once the wait above (or, without pipeline_commit, the
+	 * commit thread) has seen it complete, the transaction is durable. As
+	 * in stock JBD2, only async_commit needs a flush here.
 	 */
 	if (!err && (journal->j_flags & JRNL_COMP_JBD2_BARRIER) &&
 	    jrnl_comp_jbd2_has_feature_async_commit(journal)) {
