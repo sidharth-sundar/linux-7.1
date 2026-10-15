@@ -2567,7 +2567,14 @@ void jrnl_comp_jbd2_journal_barrier_flush_transaction(jrnl_comp_journal_t *journ
 				err = -EIO;
 		}
 	}
-	if (!err && (journal->j_flags & JRNL_COMP_JBD2_BARRIER)) {
+	/*
+	 * Without async_commit the commit record carried REQ_PREFLUSH | REQ_FUA,
+	 * was submitted only after every log and ordered-data write completed,
+	 * and the commit thread waited for it: the transaction is already
+	 * durable. As in stock JBD2, only async_commit needs a flush here.
+	 */
+	if (!err && (journal->j_flags & JRNL_COMP_JBD2_BARRIER) &&
+	    jrnl_comp_jbd2_has_feature_async_commit(journal)) {
 		trace_jrnl_comp_cjfs_event(journal->j_fs_dev->bd_dev, durable_tid,
 			batch[0]->t_jrnl_comp_cjfs_generation, "flush_call", 1);
 		ji_wait(journal, durable_tid, JI_DEVICE_FLUSH, 0,
