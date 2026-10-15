@@ -198,6 +198,10 @@ static int journal_pack_subblocks(jrnl_comp_transaction_t *t, struct list_head *
 		/* This temporary bh is never submitted: the packed I/O completes it. */
 		escaped = jrnl_comp_jbd2_journal_write_metadata_buffer(t, jh, &shadow, 0);
 		J_ASSERT(escaped >= 0);
+		spin_lock(&jh->b_state_lock);
+		entry->b_subblock_packed = true;
+		entry->b_subblock_packed_tid = t->t_tid;
+		spin_unlock(&jh->b_state_lock);
 		lock_buffer(shadow);
 		clear_buffer_dirty(shadow);
 		jrnl_comp_jbd2_file_log_bh(io_bufs, shadow);
@@ -2370,6 +2374,7 @@ restart_loop:
 		struct buffer_head *bh;
 		int try_to_free = 0;
 		bool drop_ref;
+		bool delta, pinned;
 
 		jh = commit_transaction->t_forget;
 		spin_unlock(&journal->j_list_lock);
@@ -2409,9 +2414,31 @@ restart_loop:
 			jh->b_jh_entry[ver_tid]->b_frozen_triggers = NULL;
 		}
 
+		/*
+		 * Retire-by-relog is valid only for a full image, which contains
+		 * every older change to the block. A sub-block delta holds only
+		 * this transaction's segments: if the block is still on an older
+		 * transaction's checkpoint list, its home copy lacks those older
+		 * segments, so leave it there. The older transaction then keeps
+		 * the log tail until a home write, whose live-buffer contents
+		 * include every committed delta, cleans the block. A block that
+		 * is on no checkpoint list has a current home copy, and the delta
+		 * is filed below as usual.
+		 */
+		delta = jh->b_jh_entry[ver_tid]->b_subblock_packed &&
+			jh->b_jh_entry[ver_tid]->b_subblock_packed_tid ==
+				commit_transaction->t_tid;
+		jh->b_jh_entry[ver_tid]->b_subblock_packed = false;
 		spin_lock(&journal->j_list_lock);
 		cp_transaction = jh->b_cp_transaction;
-		if (cp_transaction) {
+		pinned = cp_transaction && delta && !buffer_freed(bh) &&
+			 buffer_jbddirty(bh);
+		if (pinned) {
+			trace_jrnl_comp_cjfs_event(journal->j_fs_dev->bd_dev,
+				commit_transaction->t_tid,
+				commit_transaction->t_jrnl_comp_cjfs_generation,
+				"subblock_pin", cp_transaction->t_tid);
+		} else if (cp_transaction) {
 			JBUFFER_TRACE(jh, "remove from old cp transaction");
 			cp_transaction->t_chp_stats.cs_dropped++;
 			__jrnl_comp_jbd2_journal_remove_checkpoint(jh);
@@ -2460,7 +2487,9 @@ restart_loop:
 			}
 		}
 
-		if (buffer_jbddirty(bh)) {
+		if (pinned) {
+			/* Stays on the older transaction's checkpoint list. */
+		} else if (buffer_jbddirty(bh)) {
 			JBUFFER_TRACE(jh, "add to new checkpointing trans");
 			__jrnl_comp_jbd2_journal_insert_checkpoint(jh, commit_transaction);
 			if (is_journal_aborted(journal))

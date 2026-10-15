@@ -134,6 +134,14 @@ struct b_jh_entry {
 	/* Dirty 64-byte units for this version, protected by b_state_lock. */
 	unsigned long long b_subblock_dirty;
 	jrnl_comp_tid_t b_subblock_tid;
+	/*
+	 * Set to the committing tid when this version was logged as a sub-block
+	 * delta rather than a full image; consumed (cleared) when that
+	 * transaction finishes. A delta does not supersede older checkpoint
+	 * state for the block. [b_state_lock]
+	 */
+	jrnl_comp_tid_t b_subblock_packed_tid;
+	bool b_subblock_packed;
 	/* Set until this version's journal I/O has completed. */
 	unsigned long b_io_state;
 	unsigned 				b_jlist;
