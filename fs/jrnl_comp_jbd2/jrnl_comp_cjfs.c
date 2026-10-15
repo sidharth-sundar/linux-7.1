@@ -3,8 +3,33 @@
 #include <linux/jrnl_comp_jbd2.h>
 #include <linux/jrnl_comp_jbd2_workvolume.h>
 #include "subblock_format.h"
+#include <linux/moduleparam.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/jrnl_comp_cjfs.h>
+
+/*
+ * Experimental: highest version depth that reconfiguration admits. The
+ * default (1) keeps the validated composition-matrix policy. Depth above one
+ * is admitted only for eager full-block logging with a zero coalescing
+ * window: lazy copying and sub-block logging remain depth-one only.
+ */
+static unsigned int max_version_depth = 1;
+module_param(max_version_depth, uint, 0644);
+MODULE_PARM_DESC(max_version_depth,
+		 "Highest admitted version depth (experimental above 1; eager full-block only)");
+
+static bool jrnl_comp_cjfs_depth_admitted(jrnl_comp_journal_t *journal)
+{
+ unsigned int depth = journal->j_jrnl_comp_cjfs_pending_depth;
+
+ if (depth == 1)
+  return true;
+ return depth <= min_t(unsigned int, READ_ONCE(max_version_depth),
+         JRNL_COMP_CJFS_MAX_VERSIONS) &&
+        journal->j_jrnl_comp_cjfs_pending_eager &&
+        !journal->j_jrnl_comp_cjfs_pending_window_us &&
+        !journal->j_subblock_pending_granularity;
+}
 
 /* Caller holds the configuration mutex and protects the mount lifetime. */
 int jrnl_comp_jbd2_jrnl_comp_cjfs_reconfigure(jrnl_comp_journal_t *journal)
@@ -19,7 +44,7 @@ int jrnl_comp_jbd2_jrnl_comp_cjfs_reconfigure(jrnl_comp_journal_t *journal)
   * Full-block eager/lazy and eager 256-byte logging are admitted below;
   * lazy sub-block logging stays unsupported. The default remains zero.
   */
- if (journal->j_jrnl_comp_cjfs_pending_depth != 1 ||
+ if (!jrnl_comp_cjfs_depth_admitted(journal) ||
      journal->j_jrnl_comp_cjfs_pending_eager !=
          journal->j_jrnl_comp_cjfs_eager ||
      journal->j_jrnl_comp_cjfs_pending_window_us > 1000 ||

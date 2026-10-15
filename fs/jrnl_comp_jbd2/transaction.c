@@ -1371,6 +1371,7 @@ int jrnl_comp_jbd2_journal_get_create_access(jrnl_comp_handle_t *handle, struct 
 	{
 		struct b_jh_entry *entry = jh->b_jh_entry[ver_tid];
 		bool valid_owner;
+		int v;
 
 		spin_lock(&journal->j_list_lock);
 		valid_owner = !entry->b_transaction ||
@@ -1378,6 +1379,22 @@ int jrnl_comp_jbd2_journal_get_create_access(jrnl_comp_handle_t *handle, struct 
 			(entry->b_jlist == BJ_Forget &&
 			 (entry->b_transaction == journal->j_committing_transaction ||
 			  entry->b_transaction == journal->j_flushing_transactions));
+		/*
+		 * Above depth one, an older transaction may own another slot.
+		 * The caller is about to overwrite the live buffer without
+		 * freezing it, so every other owner must have freed the block
+		 * and must not be reading it for journal I/O.
+		 */
+		for (v = 0; v < JRNL_COMP_CJFS_MAX_VERSIONS; v++) {
+			struct b_jh_entry *other = jh->b_jh_entry[v];
+
+			if (v == ver_tid || !other->b_transaction)
+				continue;
+			if (other->b_transaction == transaction ||
+			    other->b_jlist != BJ_Forget ||
+			    test_bit(0, &other->b_io_state))
+				valid_owner = false;
+		}
 		if (!valid_owner || entry->b_next_transaction ||
 		    test_bit(0, &entry->b_io_state)) {
 			err = -EROFS;
