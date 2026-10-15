@@ -10,8 +10,10 @@
 /*
  * Experimental: highest version depth that reconfiguration admits. The
  * default (1) keeps the validated composition-matrix policy. Depth above one
- * is admitted only for eager full-block logging with a zero coalescing
- * window: lazy copying and sub-block logging remain depth-one only.
+ * is admitted only for eager copying with a zero coalescing window, with
+ * either full-block or 256-byte sub-block logging; lazy copying remains
+ * depth-one only. Sub-block logging above depth one relies on delta relogs
+ * not retiring older checkpoint state (see the flush-side finish).
  */
 static unsigned int max_version_depth = 1;
 module_param(max_version_depth, uint, 0644);
@@ -28,7 +30,8 @@ static bool jrnl_comp_cjfs_depth_admitted(jrnl_comp_journal_t *journal)
          JRNL_COMP_CJFS_MAX_VERSIONS) &&
         journal->j_jrnl_comp_cjfs_pending_eager &&
         !journal->j_jrnl_comp_cjfs_pending_window_us &&
-        !journal->j_subblock_pending_granularity;
+        (!journal->j_subblock_pending_granularity ||
+         journal->j_subblock_pending_granularity == 256);
 }
 
 /* Caller holds the configuration mutex and protects the mount lifetime. */
@@ -64,7 +67,7 @@ int jrnl_comp_jbd2_jrnl_comp_cjfs_reconfigure(jrnl_comp_journal_t *journal)
        journal->j_subblock_pending_granularity != 128 &&
        journal->j_subblock_pending_granularity != 256) ||
       !journal->j_jrnl_comp_cjfs_pending_eager ||
-      journal->j_jrnl_comp_cjfs_pending_depth != 1 ||
+      !jrnl_comp_cjfs_depth_admitted(journal) ||
       !jrnl_comp_jbd2_sb_size_valid(journal->j_blocksize) ||
       !jrnl_comp_jbd2_has_feature_csum3(journal) ||
       jrnl_comp_jbd2_has_feature_fast_commit(journal)))
